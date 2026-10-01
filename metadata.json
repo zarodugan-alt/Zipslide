@@ -1,0 +1,6 @@
+{
+  "name": "ZipSlide",
+  "description": "Browse slideshow zip files with instant 1.jpg covers and play smooth fullscreen slideshows",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
