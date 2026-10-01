@@ -48,3 +48,21 @@ actually needs while a frame is on screen.
 The browser now lists only archives that satisfy the strict `1.x` cover rule, with the hidden count
 shown in the header subtitle rather than silently dropped. The rule is reversible from the overflow
 menu in one tap, and the "No 1.jpg" audit chip reappears when it is off.
+
+### 6. A Transition Catalogue, Not a Toggle
+
+The transition list is a Compose re-implementation of the vocabulary the Android ecosystem already
+settled on through years of `ViewPager.PageTransformer` collections — depth, cube in/out, horizontal
+and vertical flips, rotate up/down, stack, fan, gate, accordion, tablet, foreground/background,
+parallax and the two zooms — rewritten as pure `graphicsLayer` maths in `SlideTransitions.kt`.
+
+Two rules keep it honest:
+
+1. **One implementation.** The Settings preview runs the *same* `applyTransition` function the viewer
+   runs, on two stand-in frames, on a loop. There is no mock animation to drift out of sync.
+2. **One coordinate contract.** `pageOffset` is Compose's convention; the file converts once to the
+   classic `position = -pageOffset` so the well-known transformer formulas port verbatim, and every
+   "non-sliding" style pins itself with `translationX = -position * width`.
+
+*Surprise me* resolves to a concrete style on each pager settle — never mid-animation — so a random
+run never changes curve halfway through a turn.

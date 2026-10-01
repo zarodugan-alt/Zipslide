@@ -44,6 +44,9 @@ data class AppSettings(
     val slideTapZones: Boolean = true,
     /** Volume down advances, volume up goes back, while the viewer is on screen. */
     val slideVolumeKeys: Boolean = true,
+    /** Swaps the pair so volume up advances instead. */
+    val slideVolumeKeysInverted: Boolean = false,
+    val slideLockRotation: Boolean = false,
     val slideProgressLine: Boolean = true,
     val slideHaptics: Boolean = true,
     val slideKenBurns: Boolean = true,
@@ -88,6 +91,8 @@ class SettingsRepository(private val context: Context) {
         val slideTransitionMs = intPreferencesKey("slide_transition_ms")
         val slideTapZones = booleanPreferencesKey("slide_tap_zones")
         val slideVolumeKeys = booleanPreferencesKey("slide_volume_keys")
+        val slideVolumeKeysInverted = booleanPreferencesKey("slide_volume_keys_inverted")
+        val slideLockRotation = booleanPreferencesKey("slide_lock_rotation")
         val slideProgressLine = booleanPreferencesKey("slide_progress_line")
         val slideHaptics = booleanPreferencesKey("slide_haptics")
         val slideKenBurns = booleanPreferencesKey("slide_ken_burns")
@@ -124,6 +129,8 @@ class SettingsRepository(private val context: Context) {
         slideTransitionMs = (prefs[Key.slideTransitionMs] ?: 520).coerceIn(160, 1200),
         slideTapZones = prefs[Key.slideTapZones] ?: true,
         slideVolumeKeys = prefs[Key.slideVolumeKeys] ?: true,
+        slideVolumeKeysInverted = prefs[Key.slideVolumeKeysInverted] ?: false,
+        slideLockRotation = prefs[Key.slideLockRotation] ?: false,
         slideProgressLine = prefs[Key.slideProgressLine] ?: true,
         slideHaptics = prefs[Key.slideHaptics] ?: true,
         slideKenBurns = prefs[Key.slideKenBurns] ?: true,
@@ -166,6 +173,8 @@ class SettingsRepository(private val context: Context) {
         prefs[Key.slideTransitionMs] = value.slideTransitionMs
         prefs[Key.slideTapZones] = value.slideTapZones
         prefs[Key.slideVolumeKeys] = value.slideVolumeKeys
+        prefs[Key.slideVolumeKeysInverted] = value.slideVolumeKeysInverted
+        prefs[Key.slideLockRotation] = value.slideLockRotation
         prefs[Key.slideProgressLine] = value.slideProgressLine
         prefs[Key.slideHaptics] = value.slideHaptics
         prefs[Key.slideKenBurns] = value.slideKenBurns
@@ -195,6 +204,8 @@ class SettingsRepository(private val context: Context) {
     suspend fun updateSlideTransitionMs(duration: Int) = update { it.copy(slideTransitionMs = duration.coerceIn(160, 1200)) }
     suspend fun updateSlideTapZones(enabled: Boolean) = update { it.copy(slideTapZones = enabled) }
     suspend fun updateSlideVolumeKeys(enabled: Boolean) = update { it.copy(slideVolumeKeys = enabled) }
+    suspend fun updateSlideVolumeKeysInverted(enabled: Boolean) = update { it.copy(slideVolumeKeysInverted = enabled) }
+    suspend fun updateSlideLockRotation(enabled: Boolean) = update { it.copy(slideLockRotation = enabled) }
     suspend fun updateSlideProgressLine(enabled: Boolean) = update { it.copy(slideProgressLine = enabled) }
     suspend fun updateSlideHaptics(enabled: Boolean) = update { it.copy(slideHaptics = enabled) }
     suspend fun updateSlideKenBurns(enabled: Boolean) = update { it.copy(slideKenBurns = enabled) }

@@ -2,6 +2,7 @@ package com.example.ui.slideshow
 
 import android.app.Activity
 import android.content.ContentValues
+import android.content.pm.ActivityInfo
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Environment
@@ -157,7 +158,7 @@ fun SlideshowScreen(
     var fitToScreen by remember(effectiveSettings.slideFitToScreen) { mutableStateOf(effectiveSettings.slideFitToScreen) }
     var intervalSeconds by remember(effectiveSettings.slideIntervalMs) { mutableFloatStateOf(effectiveSettings.slideshowInterval) }
 
-    val transition = effectiveSettings.slideTransition
+    val selectedTransition = effectiveSettings.slideTransition
     val transitionMs = effectiveSettings.slideTransitionMs
     val tapZonesEnabled = effectiveSettings.slideTapZones
     val hapticsEnabled = effectiveSettings.slideHaptics
@@ -207,6 +208,17 @@ fun SlideshowScreen(
         onDispose { activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) }
     }
 
+    // Holding a phone flat in bed should not flip the frame. The previous request is restored on exit.
+    DisposableEffect(effectiveSettings.slideLockRotation) {
+        val previous = activity?.requestedOrientation
+        if (effectiveSettings.slideLockRotation) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LOCKED
+        }
+        onDispose {
+            activity?.requestedOrientation = previous ?: ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
     // True cinema mode: system bars disappear with the chrome and slide back with it.
     DisposableEffect(effectiveSettings.slideImmersive, chromeVisible) {
         val window = activity?.window
@@ -241,6 +253,14 @@ fun SlideshowScreen(
     val pagerState = rememberPagerState(initialPage = startIndex, pageCount = { pageCount })
 
     val currentPage = pagerState.currentPage
+
+    // "Surprise me" draws a fresh style per frame, chosen when the pager settles so a style can
+    // never change half way through the animation it is driving.
+    val transition = if (selectedTransition.isRandom) {
+        remember(pagerState.settledPage) { SlideTransition.randomConcrete() }
+    } else {
+        selectedTransition
+    }
     val isSettled by remember {
         derivedStateOf { !pagerState.isScrollInProgress && pagerState.currentPageOffsetFraction == 0f }
     }
@@ -386,15 +406,13 @@ fun SlideshowScreen(
             false
         } else {
             if (!repeat && hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-            when (key) {
-                VolumeKey.DOWN -> {
-                    if (!repeat) pulse(1)
-                    advance(instant = repeat)
-                }
-                VolumeKey.UP -> {
-                    if (!repeat) pulse(-1)
-                    previous(instant = repeat)
-                }
+            val forward = (key == VolumeKey.DOWN) != effectiveSettings.slideVolumeKeysInverted
+            if (forward) {
+                if (!repeat) pulse(1)
+                advance(instant = repeat)
+            } else {
+                if (!repeat) pulse(-1)
+                previous(instant = repeat)
             }
             true
         }
@@ -716,9 +734,16 @@ fun SlideshowScreen(
                                 }
                             )
                             DropdownMenuItem(
-                                text = { Text("Transition · ${transition.label}", color = ZipSlideTheme.colors.textPrimary) },
+                                text = {
+                                    Text(
+                                        text = "Transition · " + if (selectedTransition.isRandom) {
+                                            "${selectedTransition.label} (${transition.label})"
+                                        } else selectedTransition.label,
+                                        color = ZipSlideTheme.colors.textPrimary
+                                    )
+                                },
                                 onClick = {
-                                    val next = SlideTransition.entries[(transition.ordinal + 1) % SlideTransition.entries.size]
+                                    val next = SlideTransition.entries[(selectedTransition.ordinal + 1) % SlideTransition.entries.size]
                                     onEvent(SlideshowEvent.SetTransition(next))
                                 }
                             )
@@ -858,47 +883,6 @@ fun SlideshowScreen(
                             .padding(horizontal = ZipSlideTheme.spacing.s20, vertical = ZipSlideTheme.spacing.s12)
                     )
                 }
-            }
-        }
-    }
-}
-
-/** Applies the selected page motion. Every style fully controls its own placement. */
-private fun androidx.compose.ui.graphics.GraphicsLayerScope.applyTransition(
-    style: SlideTransition,
-    pageOffset: Float
-) {
-    val distance = abs(pageOffset).coerceIn(0f, 1f)
-    when (style) {
-        SlideTransition.FADE -> {
-            translationX = pageOffset * size.width
-            alpha = 1f - distance
-        }
-        SlideTransition.SLIDE -> {
-            translationX = pageOffset * size.width * 0.35f
-            alpha = 1f - distance * 0.45f
-            val shrink = lerp(0.93f, 1f, 1f - distance)
-            scaleX = shrink
-            scaleY = shrink
-        }
-        SlideTransition.ZOOM -> {
-            translationX = pageOffset * size.width
-            alpha = 1f - distance
-            val shrink = lerp(0.84f, 1f, 1f - distance)
-            scaleX = shrink
-            scaleY = shrink
-        }
-        SlideTransition.DEPTH -> {
-            if (pageOffset >= 0f) {
-                translationX = pageOffset * size.width
-                alpha = 1f - distance
-                val shrink = lerp(1f, 0.72f, distance)
-                scaleX = shrink
-                scaleY = shrink
-            } else {
-                alpha = 1f
-                scaleX = 1f
-                scaleY = 1f
             }
         }
     }

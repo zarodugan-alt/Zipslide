@@ -54,7 +54,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.AppSettings
-import com.example.data.model.SlideTransition
 import com.example.data.model.SortBy
 import com.example.data.model.ViewMode
 import com.example.design.ZipSlideTheme
@@ -408,23 +407,25 @@ fun SettingsScreen(
             }
 
             item {
-                SettingRow(label = "Transition") {
-                    Row(horizontalArrangement = Arrangement.spacedBy(ZipSlideTheme.spacing.s8)) {
-                        SlideTransition.entries.forEach { option ->
-                            val isSelected = settings.slideTransition == option
-                            Text(
-                                text = option.label,
-                                style = ZipSlideTheme.typography.caption.copy(fontWeight = FontWeight.SemiBold),
-                                color = if (isSelected) ZipSlideTheme.colors.accent else ZipSlideTheme.colors.textTertiary,
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(ZipSlideTheme.radii.full))
-                                    .background(if (isSelected) ZipSlideTheme.colors.accentSoft else Color.Transparent)
-                                    .clickable { onEvent(SettingsEvent.SetTransition(option)) }
-                                    .padding(horizontal = ZipSlideTheme.spacing.s12, vertical = ZipSlideTheme.spacing.s4)
-                            )
-                        }
-                    }
-                }
+                Text(
+                    text = "Transition",
+                    style = ZipSlideTheme.typography.bodyM,
+                    color = ZipSlideTheme.colors.textPrimary,
+                    modifier = Modifier.padding(
+                        start = ZipSlideTheme.spacing.screenGutter,
+                        end = ZipSlideTheme.spacing.screenGutter,
+                        bottom = ZipSlideTheme.spacing.s8
+                    )
+                )
+            }
+
+            item {
+                TransitionPicker(
+                    selected = settings.slideTransition,
+                    durationMs = settings.slideTransitionMs,
+                    onSelect = { onEvent(SettingsEvent.SetTransition(it)) },
+                    modifier = Modifier.padding(bottom = ZipSlideTheme.spacing.s8)
+                )
             }
 
             item {
@@ -473,6 +474,24 @@ fun SettingsScreen(
                     description = "Volume down jumps forward, volume up goes back — hold either to fly through frames",
                     checked = settings.slideVolumeKeys,
                     onCheckedChange = { onEvent(SettingsEvent.SetVolumeKeys(it)) }
+                )
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "Invert volume keys",
+                    description = "Volume up jumps forward instead of back",
+                    checked = settings.slideVolumeKeysInverted,
+                    onCheckedChange = { onEvent(SettingsEvent.SetVolumeKeysInverted(it)) }
+                )
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "Lock rotation while viewing",
+                    description = "Freezes the current orientation until you leave the viewer",
+                    checked = settings.slideLockRotation,
+                    onCheckedChange = { onEvent(SettingsEvent.SetLockRotation(it)) }
                 )
             }
 

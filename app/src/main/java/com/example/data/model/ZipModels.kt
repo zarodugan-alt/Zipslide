@@ -115,16 +115,49 @@ enum class VolumeFilter { ALL, INTERNAL, SD, USB }
 enum class BrowserFilter { ALL, FAVORITES, CONTINUE, MISSING_COVER }
 
 /**
- * Frame-to-frame motion used by the slideshow pager. Every style is driven by the live pager
- * offset so a manual swipe and an automatic advance share exactly the same curve.
+ * Frame-to-frame motion used by the slideshow pager.
+ *
+ * The catalogue mirrors the vocabulary established by the classic ViewPager / ViewPager2
+ * page-transformer collections (depth, cube in/out, flips, rotations, stack, fan, gate,
+ * accordion, tablet, fore/background, zooms) re-implemented as Compose `graphicsLayer` maths so
+ * every style is driven by the live pager offset — a swipe and an automatic advance share one curve.
+ *
+ * Persisted by `name`, so entries may be appended freely.
  */
 enum class SlideTransition(val label: String) {
     FADE("Dissolve"),
     SLIDE("Glide"),
-    ZOOM("Zoom"),
-    DEPTH("Depth");
+    ZOOM("Zoom out"),
+    DEPTH("Depth"),
+    PUSH("Slide"),
+    PARALLAX("Parallax"),
+    ZOOM_IN("Zoom in"),
+    CUBE_IN("Cube in"),
+    CUBE_OUT("Cube out"),
+    FLIP("Flip"),
+    FLIP_VERTICAL("Flip up"),
+    ROTATE_UP("Rotate up"),
+    ROTATE_DOWN("Rotate down"),
+    STACK("Stack"),
+    FAN("Fan"),
+    GATE("Gate"),
+    ACCORDION("Accordion"),
+    TABLET("Tablet"),
+    PULL_BACK("Pull back"),
+    PUSH_FORWARD("Push forward"),
+    VERTICAL("Vertical"),
+    SHUTTER("Shutter"),
+    CAROUSEL("Carousel"),
+    RANDOM("Surprise me");
+
+    val isRandom: Boolean get() = this == RANDOM
 
     companion object {
+        /** Everything the viewer can actually draw; excludes the meta "Surprise me" entry. */
+        val concrete: List<SlideTransition> by lazy { entries.filterNot { it.isRandom } }
+
+        fun randomConcrete(): SlideTransition = concrete.random()
+
         fun fromName(value: String?): SlideTransition =
             entries.firstOrNull { it.name.equals(value, ignoreCase = true) } ?: FADE
     }

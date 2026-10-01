@@ -42,13 +42,17 @@ The viewer is built around reading, not transport controls.
 - **Volume keys** — volume **down** moves forward, volume **up** moves back, and *holding* either key
   auto-repeats with the animation skipped, so you can cross a 300-frame archive in a couple of
   seconds. The keys are captured only while the viewer is open; everywhere else they control volume
-  as usual. (Settings → Slideshow → Volume keys navigate.)
+  as usual, and the pair can be inverted. (Settings → Slideshow → Volume keys navigate.)
 - **Remaining-time line** — a 3 dp rail pinned to the very top of the screen shrinks linearly as the
   current frame runs out, and dims the moment playback pauses.
-- **Four transitions** — Dissolve, Glide, Zoom and Depth, each driven by the live pager offset so a
-  manual swipe and an automatic advance share one curve. Transition length is adjustable (160–1200 ms).
+- **23 transitions** with a live, looping preview in Settings — Slide, Dissolve, Glide, Parallax,
+  Zoom in, Zoom out, Depth, Cube in, Cube out, Flip, Flip up, Rotate up, Rotate down, Stack, Fan,
+  Gate, Accordion, Tablet, Pull back, Push forward, Vertical, Shutter, Carousel, plus **Surprise me**
+  which draws a fresh style for every frame. Each is driven by the live pager offset, so a manual
+  swipe and an automatic advance share one curve. Length is adjustable (160–1200 ms).
 - **Ken Burns drift** — an almost imperceptible 5.5 % zoom across each frame's dwell time.
 - **Clean letterboxing** — a fitted frame sits on pure black; nothing moves behind it.
+- **Rotation lock** — optionally freeze the orientation for as long as the viewer is open.
 - **Cinema mode** — system bars hide with the chrome and return with it.
 - **Gestures** — pinch/double-tap zoom with bounded panning, swipe down to dismiss with a live
   scale-and-slide, long-press to save the frame to `Pictures/ZipSlide`.
