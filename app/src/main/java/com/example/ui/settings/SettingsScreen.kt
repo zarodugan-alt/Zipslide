@@ -62,7 +62,6 @@ import com.example.ui.components.ConfirmDialog
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.formatBytes
 import kotlinx.coroutines.launch
-import java.io.File
 
 @Composable
 fun SettingsScreen(
@@ -70,7 +69,8 @@ fun SettingsScreen(
     settingsRepository: SettingsRepository,
     zipRepository: ZipRepository,
     onNavigateToDiagnostics: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    cacheSizeBytes: Long = 0L
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -81,12 +81,8 @@ fun SettingsScreen(
     var showLicensesDialog by remember { mutableStateOf(false) }
     var sortDropdownOpen by remember { mutableStateOf(false) }
 
-    // Calculate cache directory size
-    val cacheSize = remember {
-        val dir = File(context.filesDir, "thumbs")
-        val size = dir.listFiles()?.sumOf { it.length() } ?: 0L
-        formatBytes(size)
-    }
+    // Repository calculates cache size on Dispatchers.IO; the screen only formats immutable state.
+    val cacheSize = formatBytes(cacheSizeBytes)
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()

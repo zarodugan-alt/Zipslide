@@ -130,9 +130,9 @@ class MainActivity : ComponentActivity() {
 
                         composable("browser") {
                             BrowserScreen(
-                                zips = zips,
-                                isScanning = isScanning,
-                                settings = settings,
+                                fallbackZips = zips,
+                                fallbackIsScanning = isScanning,
+                                fallbackSettings = settings,
                                 volumeRepository = volumeRepo,
                                 zipRepository = zipRepo,
                                 onNavigateToSlideshow = { path, startFrame ->
@@ -151,7 +151,9 @@ class MainActivity : ComponentActivity() {
                                 },
                                 onSelectFolderToScan = {
                                     navController.navigate("settings")
-                                }
+                                },
+                                state = browserState,
+                                onEvent = browserViewModel::onEvent
                             )
                         }
 
@@ -207,7 +209,8 @@ class MainActivity : ComponentActivity() {
                             StorageOverviewScreen(
                                 volumeRepository = volumeRepo,
                                 zips = storageState.zips,
-                                onBack = { navController.popBackStack() }
+                                onBack = { navController.popBackStack() },
+                                volumesFromState = storageState.volumes
                             )
                         }
 
@@ -217,7 +220,8 @@ class MainActivity : ComponentActivity() {
                             VolumeDiagnosticsScreen(
                                 volumeRepository = volumeRepo,
                                 zips = diagnosticsState.zips,
-                                onBack = { navController.popBackStack() }
+                                onBack = { navController.popBackStack() },
+                                volumesFromState = diagnosticsState.volumes
                             )
                         }
 
@@ -231,7 +235,8 @@ class MainActivity : ComponentActivity() {
                                 onNavigateToDiagnostics = {
                                     navController.navigate("diagnostics")
                                 },
-                                onBack = { navController.popBackStack() }
+                                onBack = { navController.popBackStack() },
+                                cacheSizeBytes = settingsState.thumbnailCacheBytes
                             )
                         }
                     }

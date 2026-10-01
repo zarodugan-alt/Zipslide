@@ -15,7 +15,6 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.io.File
 
 data class SlideshowState(
     val zip: ZipItem? = null,
@@ -41,12 +40,17 @@ class SlideshowViewModel(application: Application) : AndroidViewModel(applicatio
     fun onEvent(event: SlideshowEvent) = when (event) {
         is SlideshowEvent.Load -> viewModelScope.launch {
             local.value = SlideshowState(loading = true)
-            runCatching {
+            try {
                 val zip = container.zips.findZipItem(event.path) ?: fallback(event.path)
                 container.zips.beginPlayback(zip)
-                zip to container.zips.getZipEntries(zip).filter { it.isImage }
-            }.onSuccess { (zip, images) -> local.value = SlideshowState(zip = zip, images = images, loading = false) }
-                .onFailure { local.value = SlideshowState(loading = false, error = it.toUserMessage()) }
+                val images = container.zips.getZipEntries(zip).filter { it.isImage }
+                // No pager will be composed for an archive without images, so release it now.
+                if (images.isEmpty()) container.zips.endPlayback(zip.path)
+                local.value = SlideshowState(zip = zip, images = images, loading = false)
+            } catch (error: Throwable) {
+                container.zips.endPlayback(event.path)
+                local.value = SlideshowState(loading = false, error = error.toUserMessage())
+            }
         }
         is SlideshowEvent.FrameChanged -> viewModelScope.launch {
             container.zips.updateLastFrame(event.path, event.frame)
@@ -58,10 +62,8 @@ class SlideshowViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     private fun fallback(path: String): ZipItem {
-        val file = File(path)
         return ZipItem(
-            path = path, name = file.name.ifBlank { path.substringAfterLast('/') },
-            size = file.length(), lastModified = file.lastModified(),
+            path = path, name = path.substringAfterLast('/'), size = 0L, lastModified = 0L,
             volumeId = "primary", volumeName = "Internal storage", isSaf = path.startsWith("content://")
         )
     }

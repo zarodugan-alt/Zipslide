@@ -48,9 +48,10 @@ import com.example.ui.components.formatBytes
 fun StorageOverviewScreen(
     volumeRepository: VolumeRepository,
     zips: List<ZipItem>,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    volumesFromState: List<com.example.data.model.StorageVolumeInfo>? = null
 ) {
-    val volumes = volumeRepository.volumes.value
+    val volumes = volumesFromState ?: volumeRepository.volumes.value
 
     // Group zips by top level folders
     val folderStats = remember(zips) {

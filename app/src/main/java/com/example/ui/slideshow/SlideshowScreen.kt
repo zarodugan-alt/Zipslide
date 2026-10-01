@@ -85,7 +85,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import kotlin.random.Random
 
 @Composable
@@ -130,10 +129,9 @@ fun SlideshowScreen(
             onEvent(SlideshowEvent.Load(zipPath))
         } else {
             val item = zipRepository.findZipItem(zipPath) ?: run {
-                val file = File(zipPath)
                 ZipItem(
-                    path = zipPath, name = file.name.ifBlank { zipPath.substringAfterLast('/') },
-                    size = file.length(), lastModified = file.lastModified(),
+                    path = zipPath, name = zipPath.substringAfterLast('/'),
+                    size = 0L, lastModified = 0L,
                     volumeId = "primary", volumeName = "Internal storage", isSaf = zipPath.startsWith("content://")
                 )
             }

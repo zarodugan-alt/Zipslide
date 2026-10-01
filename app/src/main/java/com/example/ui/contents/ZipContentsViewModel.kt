@@ -13,7 +13,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.io.File
 
 data class ZipContentsState(
     val zip: ZipItem? = null,
@@ -46,10 +45,8 @@ class ZipContentsViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun fallback(path: String): ZipItem {
-        val file = File(path)
         return ZipItem(
-            path = path, name = file.name.ifBlank { path.substringAfterLast('/') },
-            size = file.length(), lastModified = file.lastModified(),
+            path = path, name = path.substringAfterLast('/'), size = 0L, lastModified = 0L,
             volumeId = "primary", volumeName = "Internal storage", isSaf = path.startsWith("content://")
         )
     }

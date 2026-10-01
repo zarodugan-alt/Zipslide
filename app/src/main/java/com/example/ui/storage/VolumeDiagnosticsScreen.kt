@@ -41,9 +41,10 @@ import com.example.ui.components.InfoRow
 fun VolumeDiagnosticsScreen(
     volumeRepository: VolumeRepository,
     zips: List<ZipItem>,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    volumesFromState: List<com.example.data.model.StorageVolumeInfo>? = null
 ) {
-    val volumes = volumeRepository.volumes.value
+    val volumes = volumesFromState ?: volumeRepository.volumes.value
 
     BackHandler {
         onBack()

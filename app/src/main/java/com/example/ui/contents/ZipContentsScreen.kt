@@ -68,7 +68,6 @@ import com.example.ui.components.formatBytes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 @Composable
 fun ZipContentsScreen(
@@ -106,10 +105,9 @@ fun ZipContentsScreen(
         } else {
             // Preview/reuse fallback; repository methods do their disk work on Dispatchers.IO.
             val item = zipRepository.findZipItem(zipPath) ?: run {
-                val file = File(zipPath)
                 ZipItem(
-                    path = zipPath, name = file.name.ifBlank { zipPath.substringAfterLast('/') },
-                    size = file.length(), lastModified = file.lastModified(),
+                    path = zipPath, name = zipPath.substringAfterLast('/'),
+                    size = 0L, lastModified = 0L,
                     volumeId = "primary", volumeName = "Internal storage", isSaf = zipPath.startsWith("content://")
                 )
             }

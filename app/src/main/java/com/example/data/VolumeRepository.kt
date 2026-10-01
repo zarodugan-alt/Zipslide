@@ -8,7 +8,11 @@ import android.os.Environment
 import android.os.storage.StorageManager
 import com.example.data.model.StorageVolumeInfo
 import com.example.data.model.Volume
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -21,6 +25,7 @@ import java.io.File
  * methods below; no UI owns mount state and an unmounted volume keeps its Room cache intact.
  */
 class VolumeRepository(private val app: Application) {
+    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _volumes = MutableStateFlow<List<Volume>>(emptyList())
     private val _uiVolumes = MutableStateFlow<List<StorageVolumeInfo>>(emptyList())
     private val _mountChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
@@ -35,7 +40,7 @@ class VolumeRepository(private val app: Application) {
     val volumes = _uiVolumes.asStateFlow()
     val currentUiVolumes: List<StorageVolumeInfo> get() = _uiVolumes.value
 
-    init { refreshVolumes() }
+    init { repositoryScope.launch { refreshVolumes() } }
 
     fun refreshVolumes() {
         val discovered = linkedMapOf<String, Volume>()
@@ -116,15 +121,19 @@ class VolumeRepository(private val app: Application) {
     fun isPathMounted(path: String): Boolean = volumeFor(path)?.isMounted ?: !unmountedRoots.any(path::startsWith)
 
     fun onMediaMounted(path: String?) {
-        path?.let { unmountedRoots.remove(File(it).canonicalOrAbsolute()) }
-        refreshVolumes()
-        _mountChanges.tryEmit(Unit)
+        repositoryScope.launch {
+            path?.let { unmountedRoots.remove(File(it).canonicalOrAbsolute()) }
+            refreshVolumes()
+            _mountChanges.emit(Unit)
+        }
     }
 
     fun onMediaUnmounted(path: String?) {
-        path?.let { unmountedRoots += File(it).canonicalOrAbsolute() }
-        refreshVolumes()
-        _mountChanges.tryEmit(Unit)
+        repositoryScope.launch {
+            path?.let { unmountedRoots += File(it).canonicalOrAbsolute() }
+            refreshVolumes()
+            _mountChanges.emit(Unit)
+        }
     }
 
     private fun toUiVolume(volume: Volume): StorageVolumeInfo {
