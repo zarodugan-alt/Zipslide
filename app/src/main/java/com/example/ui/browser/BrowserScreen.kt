@@ -533,10 +533,9 @@ fun BrowserScreen(
             } else {
                 // Main 2-column Grid (4:5 ratio, 12dp gap, 20dp gutter)
                 val columnsCount = when (settings.viewMode) {
-                    ViewMode.SMALL -> 3
-                    ViewMode.MEDIUM -> 2
-                    ViewMode.LARGE -> 1
-                    ViewMode.LIST -> 1
+                    ViewMode.GRID_SMALL -> 3
+                    ViewMode.GRID_MEDIUM -> 2
+                    ViewMode.GRID_LARGE, ViewMode.LIST -> 1
                 }
 
                 LazyVerticalGrid(

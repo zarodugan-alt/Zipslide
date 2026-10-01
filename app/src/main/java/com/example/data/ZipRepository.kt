@@ -176,7 +176,7 @@ class ZipRepository(
                         entries
                     }
                 }.awaitAll().forEach { entries ->
-                    entries.chunked(SCAN_BATCH_SIZE).forEach(scanCacheDao::upsertAll)
+                    for (batch in entries.chunked(SCAN_BATCH_SIZE)) scanCacheDao.upsertAll(batch)
                     doneVolumes++
                     found += entries.size
                     _scanProgress.value = ScanProgress.Scanning(doneVolumes, volumes.size, found)
@@ -187,7 +187,7 @@ class ZipRepository(
             // their persisted grant is valid and are scanned recursively with the same cache rule.
             settings.customScanRoots.forEach { root ->
                 val safEntries = scanSafRoot(Uri.parse(root), settings, existing)
-                safEntries.chunked(SCAN_BATCH_SIZE).forEach(scanCacheDao::upsertAll)
+                for (batch in safEntries.chunked(SCAN_BATCH_SIZE)) scanCacheDao.upsertAll(batch)
                 val id = safVolumeId(root)
                 liveByMountedVolume.getOrPut(id) { linkedSetOf() }.addAll(safEntries.map { it.path })
                 found += safEntries.size
@@ -323,10 +323,13 @@ class ZipRepository(
 
     /** Exact 1.jpg cover priority. `hasCover` is false only for natural-sort fallback. */
     fun resolveCoverEntry(imageEntries: List<String>): Pair<String?, Boolean> {
-        val candidates = imageEntries.filter(String::isImageEntry)
+        val candidates = imageEntries.filter { it.isImageEntry() }
         fun pick(exactName: String) = candidates
             .filter { it.substringAfterLast('/').equals(exactName, ignoreCase = true) }
-            .minWithOrNull(compareBy<String> { it.count { char -> char == '/' } }.thenBy(NaturalOrderComparator))
+            .minWithOrNull(Comparator { first, second ->
+                val depth = first.count { it == '/' }.compareTo(second.count { it == '/' })
+                if (depth != 0) depth else NaturalOrderComparator.compare(first, second)
+            })
         pick("1.jpg")?.let { return it to true }
         pick("1.jpeg")?.let { return it to true }
         pick("1.png")?.let { return it to true }
@@ -414,7 +417,7 @@ class ZipRepository(
                     }
                 }
             } ?: emptyList()
-            else -> ZipFile(File(zip.path)).use { archive -> archive.entries().asSequence().filter { !it.isDirectory && !it.name.startsWith("__MACOSX/") }.map(ZipEntry::toItem).toList() }
+            else -> ZipFile(File(zip.path)).use { archive -> archive.entries().asSequence().filter { !it.isDirectory && !it.name.startsWith("__MACOSX/") }.map { it.toItem() }.toList() }
         }
     } catch (_: Throwable) { emptyList() }
 
@@ -588,7 +591,7 @@ class ZipRepository(
             isZeroImages = imageCount == 0,
             isFavorite = meta?.favorite ?: false,
             lastFrameIndex = meta?.lastFrameIndex ?: 0,
-            isReadOnly = !isSaf && (source?.canWrite() == false || source.parentFile?.canWrite() == false),
+            isReadOnly = !isSaf && (source?.canWrite() == false || source?.parentFile?.canWrite() == false),
             parentFolder = source?.parent.orEmpty(),
             watchCount = meta?.watchCount ?: 0
         )
@@ -608,11 +611,11 @@ class ZipRepository(
         return if (ascending) sortedWith(comparator) else sortedWith(comparator.reversed())
     }
 
-    private fun ZipItem.matchesFilter(filter: VolumeFilter) = when (filter) {
+    private fun Volume.matchesFilter(filter: VolumeFilter) = when (filter) {
         VolumeFilter.ALL -> true
-        VolumeFilter.INTERNAL -> volumeId == "primary"
-        VolumeFilter.SD -> volumeId.startsWith("sdcard:")
-        VolumeFilter.USB -> volumeId.startsWith("usb:")
+        VolumeFilter.INTERNAL -> id == "primary"
+        VolumeFilter.SD -> id.startsWith("sdcard:")
+        VolumeFilter.USB -> id.startsWith("usb:")
     }
 
     private fun openArchiveStream(zip: ZipItem): InputStream? = if (zip.isSaf) app.contentResolver.openInputStream(Uri.parse(zip.path)) else FileInputStream(File(zip.path))

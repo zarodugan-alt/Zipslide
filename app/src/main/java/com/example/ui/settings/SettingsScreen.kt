@@ -164,15 +164,15 @@ fun SettingsScreen(
                     SegmentedButtons(
                         options = listOf("S", "M", "L"),
                         selected = when (settings.viewMode) {
-                            ViewMode.SMALL -> "S"
-                            ViewMode.MEDIUM -> "M"
-                            else -> "L"
+                            ViewMode.GRID_SMALL -> "S"
+                            ViewMode.GRID_MEDIUM -> "M"
+                            ViewMode.GRID_LARGE, ViewMode.LIST -> "L"
                         },
                         onSelect = {
                             val mode = when (it) {
-                                "S" -> ViewMode.SMALL
-                                "M" -> ViewMode.MEDIUM
-                                else -> ViewMode.LARGE
+                                "S" -> ViewMode.GRID_SMALL
+                                "M" -> ViewMode.GRID_MEDIUM
+                                else -> ViewMode.GRID_LARGE
                             }
                             scope.launch { settingsRepository.updateViewMode(mode) }
                         }
