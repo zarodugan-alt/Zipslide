@@ -21,8 +21,13 @@ data class SettingsState(
     val working: Boolean = false
 )
 sealed interface SettingsEvent {
+    data class SetTheme(val value: String) : SettingsEvent
     data class SetViewMode(val mode: ViewMode) : SettingsEvent
     data class SetSort(val sortBy: SortBy) : SettingsEvent
+    data class SetAscending(val value: Boolean) : SettingsEvent
+    data class SetStorageSource(val value: String) : SettingsEvent
+    data class SetCustomScanFolder(val uri: String) : SettingsEvent
+    data class SetThumbnailPx(val value: Int) : SettingsEvent
     data class SetShowFilenames(val value: Boolean) : SettingsEvent
     data class SetShowBadges(val value: Boolean) : SettingsEvent
     data class SetNaturalSort(val value: Boolean) : SettingsEvent
@@ -50,13 +55,30 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
 
     fun onEvent(event: SettingsEvent) = viewModelScope.launch {
         when (event) {
+            is SettingsEvent.SetTheme -> container.settings.updateTheme(event.value)
             is SettingsEvent.SetViewMode -> container.settings.updateViewMode(event.mode)
             is SettingsEvent.SetSort -> container.settings.updateSortBy(event.sortBy)
+            is SettingsEvent.SetAscending -> container.settings.updateSortAscending(event.value)
+            is SettingsEvent.SetStorageSource -> {
+                container.settings.updateStorageSource(event.value)
+                container.zips.triggerRescan()
+            }
+            is SettingsEvent.SetCustomScanFolder -> {
+                container.settings.updateCustomScanFolder(event.uri)
+                container.zips.triggerRescan()
+            }
+            is SettingsEvent.SetThumbnailPx -> container.settings.updateThumbnailPx(event.value)
             is SettingsEvent.SetShowFilenames -> container.settings.updateShowFilenames(event.value)
             is SettingsEvent.SetShowBadges -> container.settings.updateShowBadges(event.value)
             is SettingsEvent.SetNaturalSort -> container.settings.updateNaturalSort(event.value)
-            is SettingsEvent.SetIncludeSubfolders -> container.settings.updateIncludeSubfolders(event.value)
-            is SettingsEvent.SetShowHidden -> container.settings.updateShowHidden(event.value)
+            is SettingsEvent.SetIncludeSubfolders -> {
+                container.settings.updateIncludeSubfolders(event.value)
+                container.zips.triggerRescan()
+            }
+            is SettingsEvent.SetShowHidden -> {
+                container.settings.updateShowHidden(event.value)
+                container.zips.triggerRescan()
+            }
             is SettingsEvent.SetSlideInterval -> container.settings.updateSlideshowInterval(event.seconds)
             is SettingsEvent.SetShuffle -> container.settings.updateSlideshowShuffle(event.value)
             is SettingsEvent.SetLoop -> container.settings.updateSlideshowLoop(event.value)

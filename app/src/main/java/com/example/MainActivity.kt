@@ -74,7 +74,6 @@ class MainActivity : ComponentActivity() {
 
         val app = application as ZipSlideApplication
         val zipRepo = app.zipRepository
-        val settingsRepo = app.settingsRepository
         val volumeRepo = app.volumeRepository
 
         setContent {
@@ -230,13 +229,12 @@ class MainActivity : ComponentActivity() {
                             val settingsState by settingsViewModel.state.collectAsStateWithLifecycle()
                             SettingsScreen(
                                 settings = settingsState.settings,
-                                settingsRepository = settingsRepo,
-                                zipRepository = zipRepo,
                                 onNavigateToDiagnostics = {
                                     navController.navigate("diagnostics")
                                 },
                                 onBack = { navController.popBackStack() },
-                                cacheSizeBytes = settingsState.thumbnailCacheBytes
+                                cacheSizeBytes = settingsState.thumbnailCacheBytes,
+                                onEvent = settingsViewModel::onEvent
                             )
                         }
                     }
