@@ -469,6 +469,15 @@ fun SettingsScreen(
 
             item {
                 SettingSwitchRow(
+                    label = "Volume keys navigate",
+                    description = "Volume down jumps forward, volume up goes back — hold either to fly through frames",
+                    checked = settings.slideVolumeKeys,
+                    onCheckedChange = { onEvent(SettingsEvent.SetVolumeKeys(it)) }
+                )
+            }
+
+            item {
+                SettingSwitchRow(
                     label = "Remaining-time line",
                     description = "Thin bar at the very top that shrinks as the frame runs out",
                     checked = settings.slideProgressLine,

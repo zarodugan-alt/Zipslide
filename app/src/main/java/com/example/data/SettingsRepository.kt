@@ -42,6 +42,8 @@ data class AppSettings(
     val slideTransition: SlideTransition = SlideTransition.FADE,
     val slideTransitionMs: Int = 520,
     val slideTapZones: Boolean = true,
+    /** Volume down advances, volume up goes back, while the viewer is on screen. */
+    val slideVolumeKeys: Boolean = true,
     val slideProgressLine: Boolean = true,
     val slideHaptics: Boolean = true,
     val slideKenBurns: Boolean = true,
@@ -85,6 +87,7 @@ class SettingsRepository(private val context: Context) {
         val slideTransition = stringPreferencesKey("slide_transition")
         val slideTransitionMs = intPreferencesKey("slide_transition_ms")
         val slideTapZones = booleanPreferencesKey("slide_tap_zones")
+        val slideVolumeKeys = booleanPreferencesKey("slide_volume_keys")
         val slideProgressLine = booleanPreferencesKey("slide_progress_line")
         val slideHaptics = booleanPreferencesKey("slide_haptics")
         val slideKenBurns = booleanPreferencesKey("slide_ken_burns")
@@ -120,6 +123,7 @@ class SettingsRepository(private val context: Context) {
         slideTransition = prefs.enum(Key.slideTransition, SlideTransition.FADE),
         slideTransitionMs = (prefs[Key.slideTransitionMs] ?: 520).coerceIn(160, 1200),
         slideTapZones = prefs[Key.slideTapZones] ?: true,
+        slideVolumeKeys = prefs[Key.slideVolumeKeys] ?: true,
         slideProgressLine = prefs[Key.slideProgressLine] ?: true,
         slideHaptics = prefs[Key.slideHaptics] ?: true,
         slideKenBurns = prefs[Key.slideKenBurns] ?: true,
@@ -161,6 +165,7 @@ class SettingsRepository(private val context: Context) {
         prefs[Key.slideTransition] = value.slideTransition.name
         prefs[Key.slideTransitionMs] = value.slideTransitionMs
         prefs[Key.slideTapZones] = value.slideTapZones
+        prefs[Key.slideVolumeKeys] = value.slideVolumeKeys
         prefs[Key.slideProgressLine] = value.slideProgressLine
         prefs[Key.slideHaptics] = value.slideHaptics
         prefs[Key.slideKenBurns] = value.slideKenBurns
@@ -189,6 +194,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun updateSlideTransition(transition: SlideTransition) = update { it.copy(slideTransition = transition) }
     suspend fun updateSlideTransitionMs(duration: Int) = update { it.copy(slideTransitionMs = duration.coerceIn(160, 1200)) }
     suspend fun updateSlideTapZones(enabled: Boolean) = update { it.copy(slideTapZones = enabled) }
+    suspend fun updateSlideVolumeKeys(enabled: Boolean) = update { it.copy(slideVolumeKeys = enabled) }
     suspend fun updateSlideProgressLine(enabled: Boolean) = update { it.copy(slideProgressLine = enabled) }
     suspend fun updateSlideHaptics(enabled: Boolean) = update { it.copy(slideHaptics = enabled) }
     suspend fun updateSlideKenBurns(enabled: Boolean) = update { it.copy(slideKenBurns = enabled) }

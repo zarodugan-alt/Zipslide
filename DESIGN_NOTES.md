@@ -33,8 +33,12 @@ actually needs while a frame is on screen.
   offset, so an auto-advance is indistinguishable from a deliberate swipe. Transitions are computed
   inside `graphicsLayer` blocks, which keeps a 60–120 Hz swipe in the draw phase instead of
   recomposing the frame tree.
-- **Never a blank screen.** Frames are warmed two pages ahead and behind, and a fitted image gets a
-  dimmed, over-scaled copy of itself as letterbox filler instead of flat black bars.
+- **Never a blank screen.** Frames are warmed two pages ahead and behind.
+- **Nothing moves behind the photograph.** An over-scaled, dimmed copy of the frame was tried as
+  letterbox filler; during a page turn its parallax read as a second, lagging image rather than as
+  depth, so the letterbox is now pure black. The photograph is the only thing in motion.
+- **Hands stay still.** Volume down / volume up turn pages without moving a thumb across the glass,
+  and auto-repeat drops the animation so holding a key is a scrub, not a queue of animations.
 - **Feedback over chrome.** A directional gradient flash and a light haptic acknowledge each tap, so
   the absence of buttons never feels like an absence of response.
 - **Cinema mode.** System bars are tied to chrome visibility: when the controls go, the OS goes.

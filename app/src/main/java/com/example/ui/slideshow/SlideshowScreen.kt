@@ -70,6 +70,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -109,6 +110,8 @@ import com.example.data.model.ZipItem
 import com.example.data.toUserMessage
 import com.example.design.DesignTokens
 import com.example.design.ZipSlideTheme
+import com.example.util.VolumeKey
+import com.example.util.VolumeKeyDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -283,11 +286,17 @@ fun SlideshowScreen(
         }
     }
 
-    fun advance(auto: Boolean) {
+    /**
+     * @param auto true for the interval timer, which gets a slightly longer, calmer curve.
+     * @param instant skips the animation entirely; used while a volume key auto-repeats so a held
+     *   key flies through frames instead of queueing hundreds of overlapping animations.
+     */
+    fun advance(auto: Boolean = false, instant: Boolean = false) {
         val next = pagerState.currentPage + 1
+        val duration = if (auto) (transitionMs * 1.4f).toInt() else transitionMs
         when {
-            next < pageCount -> goTo(next, durationMs = if (auto) (transitionMs * 1.4f).toInt() else transitionMs)
-            isLoop && pageCount > 1 -> goTo(0, durationMs = (transitionMs * 1.4f).toInt())
+            next < pageCount -> goTo(next, animate = !instant, durationMs = duration)
+            isLoop && pageCount > 1 -> goTo(0, animate = !instant, durationMs = duration)
             else -> {
                 isPlaying = false
                 finished = true
@@ -296,11 +305,11 @@ fun SlideshowScreen(
         }
     }
 
-    fun previous() {
+    fun previous(instant: Boolean = false) {
         val prev = pagerState.currentPage - 1
         when {
-            prev >= 0 -> goTo(prev)
-            isLoop && pageCount > 1 -> goTo(pageCount - 1)
+            prev >= 0 -> goTo(prev, animate = !instant)
+            isLoop && pageCount > 1 -> goTo(pageCount - 1, animate = !instant)
         }
     }
 
@@ -357,6 +366,45 @@ fun SlideshowScreen(
         }
     }
 
+    // Directional tap feedback, the way a reader app confirms a page turn.
+    var flashSide by remember { mutableIntStateOf(0) }
+    val flash = remember { Animatable(0f) }
+    fun pulse(side: Int) {
+        flashSide = side
+        scope.launch {
+            flash.snapTo(1f)
+            flash.animateTo(0f, tween(420, easing = DesignTokens.Motion.standardEasing))
+        }
+    }
+
+    // ── Hardware volume keys ───────────────────────────────────────────────────────────────
+    // Down is forward, up is back. Holding a key auto-repeats, and repeats jump without an
+    // animation so a 300-frame archive can be crossed in a couple of seconds.
+    val volumeKeysEnabled = effectiveSettings.slideVolumeKeys
+    val onVolumeKey by rememberUpdatedState<(VolumeKey, Boolean) -> Boolean> { key, repeat ->
+        if (!volumeKeysEnabled) {
+            false
+        } else {
+            if (!repeat && hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            when (key) {
+                VolumeKey.DOWN -> {
+                    if (!repeat) pulse(1)
+                    advance(instant = repeat)
+                }
+                VolumeKey.UP -> {
+                    if (!repeat) pulse(-1)
+                    previous(instant = repeat)
+                }
+            }
+            true
+        }
+    }
+    DisposableEffect(Unit) {
+        val handler = VolumeKeyDispatcher.Handler { key, repeat -> onVolumeKey(key, repeat) }
+        VolumeKeyDispatcher.register(handler)
+        onDispose { VolumeKeyDispatcher.unregister(handler) }
+    }
+
     // ── Swipe down to dismiss ──────────────────────────────────────────────────────────────
     val dismissDrag = remember { Animatable(0f) }
     val dismissThresholdPx = with(density) { 160.dp.toPx() }
@@ -390,17 +438,6 @@ fun SlideshowScreen(
             } catch (error: Throwable) {
                 withContext(Dispatchers.Main) { Toast.makeText(context, error.toUserMessage(), Toast.LENGTH_SHORT).show() }
             }
-        }
-    }
-
-    // Directional tap feedback, the way a reader app confirms a page turn.
-    var flashSide by remember { mutableIntStateOf(0) }
-    val flash = remember { Animatable(0f) }
-    fun pulse(side: Int) {
-        flashSide = side
-        scope.launch {
-            flash.snapTo(1f)
-            flash.animateTo(0f, tween(420, easing = DesignTokens.Motion.standardEasing))
         }
     }
 
@@ -512,31 +549,9 @@ fun SlideshowScreen(
                 contentAlignment = Alignment.Center
             ) {
                 if (bitmap != null) {
-                    // Letterbox filler: the same frame, blown up and dimmed, so a portrait image
-                    // never sits in a flat black void.
-                    if (fitToScreen) {
-                        Image(
-                            bitmap = bitmap,
-                            contentDescription = null,
-                            contentScale = ContentScale.Crop,
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .graphicsLayer {
-                                    // Read the pager offset in the layer block so a swipe never
-                                    // triggers recomposition, only a cheap re-draw.
-                                    val offset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
-                                    alpha = 0.22f * (1f - abs(offset).coerceIn(0f, 1f))
-                                    scaleX = 1.25f
-                                    scaleY = 1.25f
-                                }
-                        )
-                        Box(
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .background(Color.Black.copy(alpha = 0.35f))
-                        )
-                    }
-
+                    // Letterboxing is pure black. An over-scaled copy of the frame used to sit
+                    // back here, and its parallax during a page turn read as a second, laggy
+                    // image rather than as depth.
                     Image(
                         bitmap = bitmap,
                         contentDescription = "Frame ${page + 1} of $pageCount",

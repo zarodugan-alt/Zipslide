@@ -42,6 +42,7 @@ sealed interface SettingsEvent {
     data class SetTransition(val value: SlideTransition) : SettingsEvent
     data class SetTransitionMs(val value: Int) : SettingsEvent
     data class SetTapZones(val value: Boolean) : SettingsEvent
+    data class SetVolumeKeys(val value: Boolean) : SettingsEvent
     data class SetProgressLine(val value: Boolean) : SettingsEvent
     data class SetSlideHaptics(val value: Boolean) : SettingsEvent
     data class SetKenBurns(val value: Boolean) : SettingsEvent
@@ -97,6 +98,7 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             is SettingsEvent.SetTransition -> container.settings.updateSlideTransition(event.value)
             is SettingsEvent.SetTransitionMs -> container.settings.updateSlideTransitionMs(event.value)
             is SettingsEvent.SetTapZones -> container.settings.updateSlideTapZones(event.value)
+            is SettingsEvent.SetVolumeKeys -> container.settings.updateSlideVolumeKeys(event.value)
             is SettingsEvent.SetProgressLine -> container.settings.updateSlideProgressLine(event.value)
             is SettingsEvent.SetSlideHaptics -> container.settings.updateSlideHaptics(event.value)
             is SettingsEvent.SetKenBurns -> container.settings.updateSlideKenBurns(event.value)

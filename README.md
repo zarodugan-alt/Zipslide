@@ -39,11 +39,16 @@ The viewer is built around reading, not transport controls.
 
 - **Edge taps** — the right third of the frame advances, the left third goes back, the centre toggles
   chrome. A soft directional flash plus a haptic tick confirms every tap. (Toggle in Settings.)
+- **Volume keys** — volume **down** moves forward, volume **up** moves back, and *holding* either key
+  auto-repeats with the animation skipped, so you can cross a 300-frame archive in a couple of
+  seconds. The keys are captured only while the viewer is open; everywhere else they control volume
+  as usual. (Settings → Slideshow → Volume keys navigate.)
 - **Remaining-time line** — a 3 dp rail pinned to the very top of the screen shrinks linearly as the
   current frame runs out, and dims the moment playback pauses.
 - **Four transitions** — Dissolve, Glide, Zoom and Depth, each driven by the live pager offset so a
   manual swipe and an automatic advance share one curve. Transition length is adjustable (160–1200 ms).
 - **Ken Burns drift** — an almost imperceptible 5.5 % zoom across each frame's dwell time.
+- **Clean letterboxing** — a fitted frame sits on pure black; nothing moves behind it.
 - **Cinema mode** — system bars hide with the chrome and return with it.
 - **Gestures** — pinch/double-tap zoom with bounded panning, swipe down to dismiss with a live
   scale-and-slide, long-press to save the frame to `Pictures/ZipSlide`.
