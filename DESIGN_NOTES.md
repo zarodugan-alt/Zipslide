@@ -19,3 +19,28 @@ ZipSlide was crafted with a dark-first, warm-gold aesthetic designed specificall
 - **Fast 140ms Press Response**: Scale down to 0.97 on press gives instantaneous physical tactile feedback.
 - **Spring Physics for Pager**: Natural deceleration when swiping frames in the slideshow.
 - **Zero-Chrome Entry**: When launching a slideshow, chrome is immediately hidden so the viewer is immersed strictly in the photography. Tap toggles chrome with an automatic 3-second fadeout.
+
+### 4. The Viewer Rewrite
+
+The original viewer wore a media-player costume: a floating pill with skip-back, a 56 dp accent
+play button and skip-forward. That borrowed vocabulary from audio, where there is nothing to look
+at. A slideshow is read like a book, so the controls were deleted and replaced with the page-turn
+model: right third forward, left third back, centre reveals chrome. The only persistent affordance
+is a 3 dp remaining-time rail at the very top edge — the single piece of information a viewer
+actually needs while a frame is on screen.
+
+- **One curve for every advance.** Manual swipes and the interval timer both drive the same pager
+  offset, so an auto-advance is indistinguishable from a deliberate swipe. Transitions are computed
+  inside `graphicsLayer` blocks, which keeps a 60–120 Hz swipe in the draw phase instead of
+  recomposing the frame tree.
+- **Never a blank screen.** Frames are warmed two pages ahead and behind, and a fitted image gets a
+  dimmed, over-scaled copy of itself as letterbox filler instead of flat black bars.
+- **Feedback over chrome.** A directional gradient flash and a light haptic acknowledge each tap, so
+  the absence of buttons never feels like an absence of response.
+- **Cinema mode.** System bars are tied to chrome visibility: when the controls go, the OS goes.
+
+### 5. Library Honesty
+
+The browser now lists only archives that satisfy the strict `1.x` cover rule, with the hidden count
+shown in the header subtitle rather than silently dropped. The rule is reversible from the overflow
+menu in one tap, and the "No 1.jpg" audit chip reappears when it is off.

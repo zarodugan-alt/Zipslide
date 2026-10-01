@@ -2,6 +2,17 @@
 
 ZipSlide is a high-performance Android application built for browsing `.zip` archives containing slideshow frames, automatically displaying `1.jpg` inside each zip as the visual cover thumbnail.
 
+## Library Rule: only `1.x` slideshows
+
+ZipSlide is a slideshow player, not a file manager, so by default the browser lists **only archives
+whose cover resolves through the strict `1.x` rule** (`1.jpg`, `1.jpeg`, `1.png`, `1.webp`, `1.gif`,
+or any image whose basename starts with `1.`). Ordinary zips that merely happen to contain images are
+hidden, and the header shows how many were withheld.
+
+Turn the rule off at any time from the browser overflow menu ("Showing only 1.x slideshows") or from
+*Settings → Library → Only 1.x slideshows*. With the rule off, the ⚠ *No 1.jpg* filter chip returns so
+you can audit archives that fell back to natural-sort covers.
+
 ## The `1.jpg` Rule & Customization
 
 The core premise of ZipSlide is that every slideshow zip contains `1.jpg` as its first frame. ZipSlide resolves the thumbnail in the following order:
@@ -11,11 +22,43 @@ The core premise of ZipSlide is that every slideshow zip contains `1.jpg` as its
 3. `1.png`
 4. `1.webp`
 5. `1.gif`
-6. Any image entry whose basename starts with `1.` (e.g. `1_title.jpg`, `1.bmp`)
-7. Fallback: Natural-sorted first image entry (with warning badge indicated on the card).
+6. Any image entry whose basename starts with `1.` (e.g. `1.bmp`, `1.heic`) — note that
+   `1_title.jpg` does **not** qualify, because the character after `1` is not a dot.
+7. Fallback: natural-sorted first image entry. This is the only case that counts as *not* having a
+   cover, so such archives are hidden while the `1.x` library rule is on.
 
 ### How to Change the Cover Filename Rule
-To change the thumbnail resolution logic (e.g. to prioritize `cover.jpg` or `poster.png`), edit `ZipRepository.resolveCoverEntry` in `app/src/main/java/com/example/data/ZipRepository.kt`. The method cleanly isolates the matching and ranking rules.
+The whole contract lives in `CoverRule` (`app/src/main/java/com/example/util/CoverRule.kt`): edit
+`EXACT_PRIORITY` to prefer `cover.jpg` or `poster.png`, and the browser filter, thumbnail pipeline
+and unit tests all follow automatically. `CoverRuleTest` covers the ranking, the depth tie-break,
+the `__MACOSX` junk filter and the non-strict fallback.
+
+## The Viewer
+
+The viewer is built around reading, not transport controls.
+
+- **Edge taps** — the right third of the frame advances, the left third goes back, the centre toggles
+  chrome. A soft directional flash plus a haptic tick confirms every tap. (Toggle in Settings.)
+- **Remaining-time line** — a 3 dp rail pinned to the very top of the screen shrinks linearly as the
+  current frame runs out, and dims the moment playback pauses.
+- **Four transitions** — Dissolve, Glide, Zoom and Depth, each driven by the live pager offset so a
+  manual swipe and an automatic advance share one curve. Transition length is adjustable (160–1200 ms).
+- **Ken Burns drift** — an almost imperceptible 5.5 % zoom across each frame's dwell time.
+- **Cinema mode** — system bars hide with the chrome and return with it.
+- **Gestures** — pinch/double-tap zoom with bounded panning, swipe down to dismiss with a live
+  scale-and-slide, long-press to save the frame to `Pictures/ZipSlide`.
+- **Scrubber** — drag the hairline rail at the bottom to jump anywhere in a 300-frame archive instantly.
+- **Resume** — the last settled frame is persisted per archive and restored on the next launch; the
+  browser draws a gold progress rail across any card you are part-way through.
+
+### Playback performance
+
+- Frames decode on a bounded `Dispatchers.Default` pool — never on the main thread.
+- A dedicated LRU frame cache (¼ of heap) holds decoded frames; the current page plus two in each
+  direction stay warm, everything else is evicted.
+- Downsampling stops one power-of-two step *before* the target size, so frames are never decoded
+  smaller than the panel and then upscaled.
+- The open `ZipFile` is reused for the whole session, and all decoded frames are released when playback ends.
 
 ## Multi-Volume & Storage Permission Rationale
 

@@ -17,7 +17,7 @@ import com.example.data.model.VolumeFilter
 import com.example.data.model.ZipEntryInfo
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
-import com.example.util.NaturalOrderComparator
+import com.example.util.CoverRule
 import com.example.util.naturalKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -56,7 +56,6 @@ import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 import kotlin.coroutines.coroutineContext
 
-private val IMAGE_EXT = setOf("jpg", "jpeg", "png", "webp", "bmp", "gif", "heic", "heif")
 private const val SCAN_BATCH_SIZE = 50
 
 sealed interface ScanProgress {
@@ -350,26 +349,13 @@ class ZipRepository(
         }
     }
 
-    /** Exact 1.jpg cover priority. `hasCover` is false only for natural-sort fallback. */
-    fun resolveCoverEntry(imageEntries: List<String>): Pair<String?, Boolean> {
-        val candidates = imageEntries.filter { it.isImageEntry() }
-        fun pick(exactName: String) = candidates
-            .filter { it.substringAfterLast('/').equals(exactName, ignoreCase = true) }
-            .minWithOrNull(Comparator { first, second ->
-                val depth = first.count { it == '/' }.compareTo(second.count { it == '/' })
-                if (depth != 0) depth else NaturalOrderComparator.compare(first, second)
-            })
-        pick("1.jpg")?.let { return it to true }
-        pick("1.jpeg")?.let { return it to true }
-        pick("1.png")?.let { return it to true }
-        pick("1.webp")?.let { return it to true }
-        pick("1.gif")?.let { return it to true }
-        candidates.firstOrNull { candidate ->
-            val base = candidate.substringAfterLast('/')
-            base.startsWith("1.", ignoreCase = true) && base.substringAfterLast('.').lowercase() in IMAGE_EXT
-        }?.let { return it to true }
-        return candidates.minWithOrNull(NaturalOrderComparator) to false
-    }
+    /**
+     * Exact `1.x` cover priority. `hasCover` is false only for the natural-sort fallback, and it
+     * is what the browser's "only 1.x slideshows" rule keys off. The ranking itself lives in
+     * [CoverRule] so it is unit tested independently of storage.
+     */
+    fun resolveCoverEntry(imageEntries: List<String>): Pair<String?, Boolean> =
+        CoverRule.resolve(imageEntries).let { it.entry to it.strict }
 
     /** Three-tier cache with one producer per key. Disk writes are atomic. */
     suspend fun thumbnail(zip: ZipItem, px: Int): Bitmap? {
@@ -708,7 +694,7 @@ class ZipRepository(
     private fun thumbnailKey(path: String, modified: Long, size: Long, px: Int) = (path + modified + size + px).hashCode().toUInt().toString(16)
     private fun thumbnailFile(key: String) = File(thumbsDir, "$key.jpg")
     private fun safVolumeId(uri: String) = "saf:${uri.hashCode().toUInt().toString(16)}"
-    private fun String.isImageEntry(): Boolean = !startsWith("__MACOSX/") && !substringAfterLast('/').startsWith('.') && substringAfterLast('.').lowercase() in IMAGE_EXT
+    private fun String.isImageEntry(): Boolean = CoverRule.isImageEntry(this)
     private fun ZipEntry.toItem() = ZipEntryItem(name, name.substringAfterLast('/'), name.isImageEntry(), size.coerceAtLeast(0), compressedSize.coerceAtLeast(0), folderPath = name.substringBeforeLast('/', ""))
     private fun File.canonicalOrAbsolute() = runCatching { canonicalPath }.getOrDefault(absolutePath)
     /**
