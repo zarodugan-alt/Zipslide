@@ -6,16 +6,17 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import com.example.data.model.ThemeMode
 
 @Composable
 fun ZipSlideAppTheme(
-    themeSetting: String = "dark", // "dark", "light", "system"
+    themeSetting: ThemeMode = ThemeMode.SYSTEM,
     content: @Composable () -> Unit
 ) {
-    val isDark = when (themeSetting.lowercase()) {
-        "light" -> false
-        "system" -> isSystemInDarkTheme()
-        else -> true // Dark first by default
+    val isDark = when (themeSetting) {
+        ThemeMode.LIGHT -> false
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+        ThemeMode.DARK -> true
     }
 
     val zipSlideColors = if (isDark) DarkZipSlideColors else LightZipSlideColors

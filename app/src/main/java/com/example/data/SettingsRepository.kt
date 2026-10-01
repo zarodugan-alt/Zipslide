@@ -3,165 +3,170 @@ package com.example.data
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.data.model.SortBy
+import com.example.data.model.ThemeMode
 import com.example.data.model.ViewMode
+import com.example.data.model.VolumeFilter
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 
-val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "zipslide_settings")
+private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
 data class AppSettings(
-    val theme: String = "dark",
-    val viewMode: ViewMode = ViewMode.MEDIUM,
+    val theme: ThemeMode = ThemeMode.SYSTEM,
+    val viewMode: ViewMode = ViewMode.GRID_MEDIUM,
     val showFilenames: Boolean = true,
     val showBadges: Boolean = true,
     val sortBy: SortBy = SortBy.NAME,
-    val sortAscending: Boolean = true,
+    val ascending: Boolean = true,
     val naturalSort: Boolean = true,
-    val storageSource: String = "all", // "all", "internal", "sd"
-    val customScanFolderUri: String? = null,
+    val volumeFilter: VolumeFilter = VolumeFilter.ALL,
+    val customScanRoots: Set<String> = emptySet(),
     val includeSubfolders: Boolean = true,
     val showHidden: Boolean = false,
-    val slideshowInterval: Float = 3.0f,
-    val slideshowShuffle: Boolean = false,
-    val slideshowLoop: Boolean = true,
-    val slideshowFitToScreen: Boolean = true,
-    val slideshowKeepScreenOn: Boolean = true,
+    val slideIntervalMs: Int = 3000,
+    val slideShuffle: Boolean = false,
+    val slideLoop: Boolean = true,
+    val slideFitToScreen: Boolean = true,
+    val slideKeepScreenOn: Boolean = true,
     val thumbnailPx: Int = 512,
     val onboardingCompleted: Boolean = false
-)
+) {
+    // Transitional properties keep the built UI shell source-compatible while all persisted
+    // values use the strongly typed contract above.
+    val sortAscending get() = ascending
+    val storageSource get() = volumeFilter.name.lowercase()
+    val customScanFolderUri get() = customScanRoots.firstOrNull()
+    val slideshowInterval get() = slideIntervalMs / 1000f
+    val slideshowShuffle get() = slideShuffle
+    val slideshowLoop get() = slideLoop
+    val slideshowFitToScreen get() = slideFitToScreen
+    val slideshowKeepScreenOn get() = slideKeepScreenOn
+}
 
 class SettingsRepository(private val context: Context) {
-
-    private object PreferencesKeys {
-        val THEME = stringPreferencesKey("theme")
-        val VIEW_MODE = stringPreferencesKey("view_mode")
-        val SHOW_FILENAMES = booleanPreferencesKey("show_filenames")
-        val SHOW_BADGES = booleanPreferencesKey("show_badges")
-        val SORT_BY = stringPreferencesKey("sort_by")
-        val SORT_ASCENDING = booleanPreferencesKey("sort_ascending")
-        val NATURAL_SORT = booleanPreferencesKey("natural_sort")
-        val STORAGE_SOURCE = stringPreferencesKey("storage_source")
-        val CUSTOM_SCAN_FOLDER = stringPreferencesKey("custom_scan_folder")
-        val INCLUDE_SUBFOLDERS = booleanPreferencesKey("include_subfolders")
-        val SHOW_HIDDEN = booleanPreferencesKey("show_hidden")
-        val SLIDESHOW_INTERVAL = floatPreferencesKey("slideshow_interval")
-        val SLIDESHOW_SHUFFLE = booleanPreferencesKey("slideshow_shuffle")
-        val SLIDESHOW_LOOP = booleanPreferencesKey("slideshow_loop")
-        val SLIDESHOW_FIT_TO_SCREEN = booleanPreferencesKey("slideshow_fit_to_screen")
-        val SLIDESHOW_KEEP_SCREEN_ON = booleanPreferencesKey("slideshow_keep_screen_on")
-        val THUMBNAIL_PX = intPreferencesKey("thumbnail_px")
-        val ONBOARDING_COMPLETED = booleanPreferencesKey("onboarding_completed")
+    private object Key {
+        val theme = stringPreferencesKey("theme")
+        val viewMode = stringPreferencesKey("view_mode")
+        val showFilenames = booleanPreferencesKey("show_filenames")
+        val showBadges = booleanPreferencesKey("show_badges")
+        val sortBy = stringPreferencesKey("sort_by")
+        val ascending = booleanPreferencesKey("ascending")
+        val naturalSort = booleanPreferencesKey("natural_sort")
+        val volumeFilter = stringPreferencesKey("volume_filter")
+        val customScanRoots = stringSetPreferencesKey("custom_scan_roots")
+        val includeSubfolders = booleanPreferencesKey("include_subfolders")
+        val showHidden = booleanPreferencesKey("show_hidden")
+        val slideIntervalMs = intPreferencesKey("slide_interval_ms")
+        val slideShuffle = booleanPreferencesKey("slide_shuffle")
+        val slideLoop = booleanPreferencesKey("slide_loop")
+        val slideFitToScreen = booleanPreferencesKey("slide_fit_to_screen")
+        val slideKeepScreenOn = booleanPreferencesKey("slide_keep_screen_on")
+        val thumbnailPx = intPreferencesKey("thumbnail_px")
+        val onboardingCompleted = booleanPreferencesKey("onboarding_completed")
     }
 
-    val settingsFlow: Flow<AppSettings> = context.dataStore.data.map { prefs ->
-        AppSettings(
-            theme = prefs[PreferencesKeys.THEME] ?: "dark",
-            viewMode = runCatching {
-                ViewMode.valueOf(prefs[PreferencesKeys.VIEW_MODE] ?: ViewMode.MEDIUM.name)
-            }.getOrDefault(ViewMode.MEDIUM),
-            showFilenames = prefs[PreferencesKeys.SHOW_FILENAMES] ?: true,
-            showBadges = prefs[PreferencesKeys.SHOW_BADGES] ?: true,
-            sortBy = runCatching {
-                SortBy.valueOf(prefs[PreferencesKeys.SORT_BY] ?: SortBy.NAME.name)
-            }.getOrDefault(SortBy.NAME),
-            sortAscending = prefs[PreferencesKeys.SORT_ASCENDING] ?: true,
-            naturalSort = prefs[PreferencesKeys.NATURAL_SORT] ?: true,
-            storageSource = prefs[PreferencesKeys.STORAGE_SOURCE] ?: "all",
-            customScanFolderUri = prefs[PreferencesKeys.CUSTOM_SCAN_FOLDER],
-            includeSubfolders = prefs[PreferencesKeys.INCLUDE_SUBFOLDERS] ?: true,
-            showHidden = prefs[PreferencesKeys.SHOW_HIDDEN] ?: false,
-            slideshowInterval = prefs[PreferencesKeys.SLIDESHOW_INTERVAL] ?: 3.0f,
-            slideshowShuffle = prefs[PreferencesKeys.SLIDESHOW_SHUFFLE] ?: false,
-            slideshowLoop = prefs[PreferencesKeys.SLIDESHOW_LOOP] ?: true,
-            slideshowFitToScreen = prefs[PreferencesKeys.SLIDESHOW_FIT_TO_SCREEN] ?: true,
-            slideshowKeepScreenOn = prefs[PreferencesKeys.SLIDESHOW_KEEP_SCREEN_ON] ?: true,
-            thumbnailPx = prefs[PreferencesKeys.THUMBNAIL_PX] ?: 512,
-            onboardingCompleted = prefs[PreferencesKeys.ONBOARDING_COMPLETED] ?: false
-        )
+    val settings: Flow<AppSettings> = context.dataStore.data
+        .map(::decode)
+        .distinctUntilChanged()
+    val settingsFlow: Flow<AppSettings> = settings
+
+    private fun decode(prefs: Preferences) = AppSettings(
+        theme = prefs.enum(Key.theme, ThemeMode.SYSTEM),
+        viewMode = prefs.enum(Key.viewMode, ViewMode.GRID_MEDIUM),
+        showFilenames = prefs[Key.showFilenames] ?: true,
+        showBadges = prefs[Key.showBadges] ?: true,
+        sortBy = prefs.enum(Key.sortBy, SortBy.NAME),
+        ascending = prefs[Key.ascending] ?: true,
+        naturalSort = prefs[Key.naturalSort] ?: true,
+        volumeFilter = prefs.enum(Key.volumeFilter, VolumeFilter.ALL),
+        customScanRoots = prefs[Key.customScanRoots] ?: emptySet(),
+        includeSubfolders = prefs[Key.includeSubfolders] ?: true,
+        showHidden = prefs[Key.showHidden] ?: false,
+        slideIntervalMs = prefs[Key.slideIntervalMs] ?: 3000,
+        slideShuffle = prefs[Key.slideShuffle] ?: false,
+        slideLoop = prefs[Key.slideLoop] ?: true,
+        slideFitToScreen = prefs[Key.slideFitToScreen] ?: true,
+        slideKeepScreenOn = prefs[Key.slideKeepScreenOn] ?: true,
+        thumbnailPx = prefs[Key.thumbnailPx] ?: 512,
+        onboardingCompleted = prefs[Key.onboardingCompleted] ?: false
+    )
+
+    private inline fun <reified T : Enum<T>> Preferences.enum(
+        key: Preferences.Key<String>,
+        default: T
+    ): T = runCatching { enumValueOf<T>(this[key] ?: default.name) }.getOrDefault(default)
+
+    /** Atomically persists a complete immutable state transformation. */
+    suspend fun update(transform: (AppSettings) -> AppSettings) {
+        val next = transform(settings.first())
+        context.dataStore.edit { prefs -> write(prefs, next) }
     }
 
-    suspend fun updateTheme(theme: String) {
-        context.dataStore.edit { it[PreferencesKeys.THEME] = theme }
+    private fun write(prefs: MutablePreferences, value: AppSettings) {
+        prefs[Key.theme] = value.theme.name
+        prefs[Key.viewMode] = value.viewMode.name
+        prefs[Key.showFilenames] = value.showFilenames
+        prefs[Key.showBadges] = value.showBadges
+        prefs[Key.sortBy] = value.sortBy.name
+        prefs[Key.ascending] = value.ascending
+        prefs[Key.naturalSort] = value.naturalSort
+        prefs[Key.volumeFilter] = value.volumeFilter.name
+        prefs[Key.customScanRoots] = value.customScanRoots
+        prefs[Key.includeSubfolders] = value.includeSubfolders
+        prefs[Key.showHidden] = value.showHidden
+        prefs[Key.slideIntervalMs] = value.slideIntervalMs
+        prefs[Key.slideShuffle] = value.slideShuffle
+        prefs[Key.slideLoop] = value.slideLoop
+        prefs[Key.slideFitToScreen] = value.slideFitToScreen
+        prefs[Key.slideKeepScreenOn] = value.slideKeepScreenOn
+        prefs[Key.thumbnailPx] = value.thumbnailPx
+        prefs[Key.onboardingCompleted] = value.onboardingCompleted
     }
 
-    suspend fun updateViewMode(mode: ViewMode) {
-        context.dataStore.edit { it[PreferencesKeys.VIEW_MODE] = mode.name }
+    suspend fun updateTheme(theme: String) = update { it.copy(theme = theme.toThemeMode()) }
+    suspend fun updateViewMode(mode: ViewMode) = update { it.copy(viewMode = mode) }
+    suspend fun updateShowFilenames(show: Boolean) = update { it.copy(showFilenames = show) }
+    suspend fun updateShowBadges(show: Boolean) = update { it.copy(showBadges = show) }
+    suspend fun updateSortBy(sortBy: SortBy) = update { it.copy(sortBy = sortBy) }
+    suspend fun updateSortAscending(ascending: Boolean) = update { it.copy(ascending = ascending) }
+    suspend fun updateNaturalSort(natural: Boolean) = update { it.copy(naturalSort = natural) }
+    suspend fun updateStorageSource(source: String) = update { it.copy(volumeFilter = source.toVolumeFilter()) }
+    suspend fun updateIncludeSubfolders(include: Boolean) = update { it.copy(includeSubfolders = include) }
+    suspend fun updateShowHidden(show: Boolean) = update { it.copy(showHidden = show) }
+    suspend fun updateSlideshowInterval(interval: Float) = update { it.copy(slideIntervalMs = (interval * 1000).toInt()) }
+    suspend fun updateSlideshowShuffle(shuffle: Boolean) = update { it.copy(slideShuffle = shuffle) }
+    suspend fun updateSlideshowLoop(loop: Boolean) = update { it.copy(slideLoop = loop) }
+    suspend fun updateSlideshowFitToScreen(fit: Boolean) = update { it.copy(slideFitToScreen = fit) }
+    suspend fun updateSlideshowKeepScreenOn(keep: Boolean) = update { it.copy(slideKeepScreenOn = keep) }
+    suspend fun updateThumbnailPx(px: Int) = update { it.copy(thumbnailPx = px.coerceIn(128, 2048)) }
+    suspend fun setOnboardingCompleted(completed: Boolean) = update { it.copy(onboardingCompleted = completed) }
+
+    suspend fun addCustomScanRoot(uri: String) = update { it.copy(customScanRoots = it.customScanRoots + uri) }
+    suspend fun removeCustomScanRoot(uri: String) = update { it.copy(customScanRoots = it.customScanRoots - uri) }
+    suspend fun updateCustomScanFolder(uriString: String?) = update {
+        it.copy(customScanRoots = uriString?.let(::setOf) ?: emptySet())
     }
 
-    suspend fun updateShowFilenames(show: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.SHOW_FILENAMES] = show }
+    private fun String.toThemeMode() = when (lowercase()) {
+        "light" -> ThemeMode.LIGHT
+        "dark" -> ThemeMode.DARK
+        else -> ThemeMode.SYSTEM
     }
 
-    suspend fun updateShowBadges(show: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.SHOW_BADGES] = show }
-    }
-
-    suspend fun updateSortBy(sortBy: SortBy) {
-        context.dataStore.edit { it[PreferencesKeys.SORT_BY] = sortBy.name }
-    }
-
-    suspend fun updateSortAscending(ascending: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.SORT_ASCENDING] = ascending }
-    }
-
-    suspend fun updateNaturalSort(natural: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.NATURAL_SORT] = natural }
-    }
-
-    suspend fun updateStorageSource(source: String) {
-        context.dataStore.edit { it[PreferencesKeys.STORAGE_SOURCE] = source }
-    }
-
-    suspend fun updateCustomScanFolder(uriString: String?) {
-        context.dataStore.edit {
-            if (uriString != null) {
-                it[PreferencesKeys.CUSTOM_SCAN_FOLDER] = uriString
-            } else {
-                it.remove(PreferencesKeys.CUSTOM_SCAN_FOLDER)
-            }
-        }
-    }
-
-    suspend fun updateIncludeSubfolders(include: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.INCLUDE_SUBFOLDERS] = include }
-    }
-
-    suspend fun updateShowHidden(show: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.SHOW_HIDDEN] = show }
-    }
-
-    suspend fun updateSlideshowInterval(interval: Float) {
-        context.dataStore.edit { it[PreferencesKeys.SLIDESHOW_INTERVAL] = interval }
-    }
-
-    suspend fun updateSlideshowShuffle(shuffle: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.SLIDESHOW_SHUFFLE] = shuffle }
-    }
-
-    suspend fun updateSlideshowLoop(loop: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.SLIDESHOW_LOOP] = loop }
-    }
-
-    suspend fun updateSlideshowFitToScreen(fit: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.SLIDESHOW_FIT_TO_SCREEN] = fit }
-    }
-
-    suspend fun updateSlideshowKeepScreenOn(keep: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.SLIDESHOW_KEEP_SCREEN_ON] = keep }
-    }
-
-    suspend fun updateThumbnailPx(px: Int) {
-        context.dataStore.edit { it[PreferencesKeys.THUMBNAIL_PX] = px }
-    }
-
-    suspend fun setOnboardingCompleted(completed: Boolean) {
-        context.dataStore.edit { it[PreferencesKeys.ONBOARDING_COMPLETED] = completed }
+    private fun String.toVolumeFilter() = when (lowercase()) {
+        "internal" -> VolumeFilter.INTERNAL
+        "sd" -> VolumeFilter.SD
+        "usb" -> VolumeFilter.USB
+        else -> VolumeFilter.ALL
     }
 }

@@ -74,11 +74,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
-import android.provider.DocumentsContract
 import com.example.data.AppSettings
 import com.example.data.VolumeRepository
 import com.example.data.ZipRepository
+import com.example.data.toUserMessage
 import com.example.data.model.BrowserFilter
 import com.example.data.model.SortBy
 import com.example.data.model.ViewMode
@@ -95,41 +94,60 @@ import com.example.ui.components.ShimmerBlock
 import com.example.ui.components.ZipActions
 import com.example.ui.components.ZipCard
 import com.example.ui.components.formatBytes
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BrowserScreen(
-    zips: List<ZipItem>,
-    isScanning: Boolean,
-    settings: AppSettings,
+    fallbackZips: List<ZipItem>,
+    fallbackIsScanning: Boolean,
+    fallbackSettings: AppSettings,
     volumeRepository: VolumeRepository,
     zipRepository: ZipRepository,
     onNavigateToSlideshow: (zipPath: String, startFrame: Int) -> Unit,
     onNavigateToContents: (zipPath: String) -> Unit,
     onNavigateToSettings: () -> Unit,
     onNavigateToStorageOverview: () -> Unit,
-    onSelectFolderToScan: () -> Unit
+    onSelectFolderToScan: () -> Unit,
+    state: BrowserState? = null,
+    onEvent: (BrowserEvent) -> Unit = {}
 ) {
+    val zips = state?.items ?: fallbackZips
+    val isScanning = state?.scanProgress is com.example.data.ScanProgress.Scanning || (state == null && fallbackIsScanning)
+    val settings = state?.settings ?: fallbackSettings
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val gridState = rememberLazyGridState()
 
-    var selectedFilter by remember { mutableStateOf(BrowserFilter.ALL) }
+    var fallbackSelectedFilter by remember { mutableStateOf(BrowserFilter.ALL) }
+    val selectedFilter = state?.activeFilter ?: fallbackSelectedFilter
     var searchOpen by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
+    var fallbackSearchQuery by remember { mutableStateOf("") }
+    val searchQuery = state?.searchQuery ?: fallbackSearchQuery
 
-    // Action sheet state
-    var selectedZipForSheet by remember { mutableStateOf<ZipItem?>(null) }
+    // The bottom-sheet target belongs to BrowserState; fallback supports isolated previews.
+    var fallbackSheetTarget by remember { mutableStateOf<ZipItem?>(null) }
+    val selectedZipForSheet = state?.menuTarget ?: fallbackSheetTarget
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    // Selection mode state
-    var isSelectionMode by remember { mutableStateOf(false) }
-    val selectedZipPaths = remember { mutableStateListOf<String>() }
+    // Selection comes from BrowserState in the app; mutable fallback keeps this reusable shell standalone.
+    var fallbackSelectionMode by remember { mutableStateOf(false) }
+    val fallbackSelectedPaths = remember { mutableStateListOf<String>() }
+    val isSelectionMode = state?.selectionMode ?: fallbackSelectionMode
+    val selectedZipPaths: Collection<String> = state?.selectedPaths ?: fallbackSelectedPaths
+    fun clearSelection() {
+        fallbackSelectionMode = false
+        fallbackSelectedPaths.clear()
+        onEvent(BrowserEvent.ClearSelection)
+    }
+    fun toggleSelection(path: String) {
+        if (state == null) {
+            if (!fallbackSelectedPaths.add(path)) fallbackSelectedPaths.remove(path)
+            fallbackSelectionMode = fallbackSelectedPaths.isNotEmpty()
+        }
+        onEvent(BrowserEvent.SelectToggle(path))
+    }
 
     // Dialog states
     var infoZip by remember { mutableStateOf<ZipItem?>(null) }
@@ -174,34 +192,12 @@ fun BrowserScreen(
     ) { uri ->
         if (uri != null && pendingCopyZip != null) {
             val zip = pendingCopyZip!!
+            // Repository owns the SAF stream and typed error mapping; UI only forwards the URI.
+            onEvent(if (isPendingMove) BrowserEvent.Move(zip, uri) else BrowserEvent.Copy(zip, uri))
             scope.launch {
-                progressTitle = if (isPendingMove) "Moving zip…" else "Copying zip…"
-                progressCurrent = 1
-                progressTotal = 1
-                progressCurrentName = zip.name
-                // Perform SAF copy
-                withContext(Dispatchers.IO) {
-                    try {
-                        val srcFile = File(zip.path)
-                        val docId = DocumentsContract.getTreeDocumentId(uri)
-                        val parentDocUri = DocumentsContract.buildDocumentUriUsingTree(uri, docId)
-                        val createdDoc = DocumentsContract.createDocument(context.contentResolver, parentDocUri, "application/zip", zip.name)
-                        if (createdDoc != null) {
-                            context.contentResolver.openOutputStream(createdDoc)?.use { out ->
-                                srcFile.inputStream().use { input -> input.copyTo(out) }
-                            }
-                            if (isPendingMove) {
-                                zipRepository.deleteZip(zip)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }
-                progressTitle = null
-                snackbarHostState.showSnackbar(if (isPendingMove) "Moved to selected folder" else "Copied to selected folder")
-                pendingCopyZip = null
+                snackbarHostState.showSnackbar(if (isPendingMove) "Moving zip to selected folder" else "Copying zip to selected folder")
             }
+            pendingCopyZip = null
         }
     }
 
@@ -225,9 +221,7 @@ fun BrowserScreen(
             }
 
             override fun onToggleFavorite(zip: ZipItem) {
-                scope.launch {
-                    zipRepository.toggleFavorite(zip.path)
-                }
+                onEvent(BrowserEvent.ToggleFavorite(zip))
             }
 
             override fun onRename(zip: ZipItem) {
@@ -248,12 +242,7 @@ fun BrowserScreen(
 
             override fun onShare(zip: ZipItem) {
                 try {
-                    val file = File(zip.path)
-                    if (!file.exists()) {
-                        Toast.makeText(context, "File does not exist", Toast.LENGTH_SHORT).show()
-                        return
-                    }
-                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                    val uri = zipRepository.shareUri(zip)
                     val intent = Intent(Intent.ACTION_SEND).apply {
                         type = "application/zip"
                         putExtra(Intent.EXTRA_STREAM, uri)
@@ -261,7 +250,7 @@ fun BrowserScreen(
                     }
                     context.startActivity(Intent.createChooser(intent, "Share ZipSlide Archive"))
                 } catch (e: Exception) {
-                    Toast.makeText(context, "Could not share file: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, e.toUserMessage(), Toast.LENGTH_SHORT).show()
                 }
             }
 
@@ -279,7 +268,7 @@ fun BrowserScreen(
                     if (result.isSuccess) {
                         snackbarHostState.showSnackbar("Extracted ${result.getOrNull()?.name}")
                     } else {
-                        snackbarHostState.showSnackbar("Extraction failed: ${result.exceptionOrNull()?.message}")
+                        snackbarHostState.showSnackbar(result.exceptionOrNull()?.toUserMessage() ?: "That operation could not be completed. Try again.")
                     }
                 }
             }
@@ -297,8 +286,7 @@ fun BrowserScreen(
     BackHandler(enabled = isSelectionMode || searchOpen) {
         if (searchOpen) searchOpen = false
         else if (isSelectionMode) {
-            isSelectionMode = false
-            selectedZipPaths.clear()
+            clearSelection()
         }
     }
 
@@ -317,10 +305,7 @@ fun BrowserScreen(
                         .padding(horizontal = ZipSlideTheme.spacing.s8),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = {
-                        isSelectionMode = false
-                        selectedZipPaths.clear()
-                    }) {
+                    IconButton(onClick = { clearSelection() }) {
                         Icon(Icons.Default.Close, contentDescription = "Close selection", tint = ZipSlideTheme.colors.textPrimary)
                     }
                     Text(
@@ -330,13 +315,9 @@ fun BrowserScreen(
                         modifier = Modifier.weight(1f)
                     )
                     IconButton(onClick = {
-                        scope.launch {
-                            for (path in selectedZipPaths) {
-                                zipRepository.toggleFavorite(path)
-                            }
-                            isSelectionMode = false
-                            selectedZipPaths.clear()
-                        }
+                        selectedZipPaths.mapNotNull { path -> zips.find { it.path == path } }
+                            .forEach { onEvent(BrowserEvent.ToggleFavorite(it)) }
+                        clearSelection()
                     }) {
                         Icon(Icons.Default.Star, contentDescription = "Favorite selected", tint = ZipSlideTheme.colors.accent)
                     }
@@ -415,11 +396,7 @@ fun BrowserScreen(
                                             },
                                             onClick = {
                                                 sortMenuOpen = false
-                                                scope.launch {
-                                                    zipRepository.triggerRescan()
-                                                    val repo = com.example.ZipSlideApplication.instance.settingsRepository
-                                                    repo.updateSortBy(sortOption)
-                                                }
+                                                onEvent(BrowserEvent.SortChange(sortOption))
                                             }
                                         )
                                     }
@@ -443,16 +420,19 @@ fun BrowserScreen(
                                         text = { Text("Rescan storage", color = ZipSlideTheme.colors.textPrimary) },
                                         onClick = {
                                             overflowMenuOpen = false
-                                            zipRepository.triggerRescan()
+                                            onEvent(BrowserEvent.Rescan)
                                         }
                                     )
                                     DropdownMenuItem(
                                         text = { Text("Select all", color = ZipSlideTheme.colors.textPrimary) },
                                         onClick = {
                                             overflowMenuOpen = false
-                                            isSelectionMode = true
-                                            selectedZipPaths.clear()
-                                            selectedZipPaths.addAll(filteredZips.map { it.path })
+                                            if (state == null) {
+                                                fallbackSelectedPaths.clear()
+                                                fallbackSelectedPaths.addAll(filteredZips.map { it.path })
+                                                fallbackSelectionMode = fallbackSelectedPaths.isNotEmpty()
+                                            }
+                                            onEvent(BrowserEvent.SelectAll)
                                         }
                                     )
                                     DropdownMenuItem(
@@ -477,7 +457,10 @@ fun BrowserScreen(
                     Spacer(modifier = Modifier.height(ZipSlideTheme.spacing.s12))
                     FilterChipRow(
                         selectedFilter = selectedFilter,
-                        onFilterSelected = { selectedFilter = it }
+                        onFilterSelected = {
+                            fallbackSelectedFilter = it
+                            onEvent(BrowserEvent.FilterChange(it))
+                        }
                     )
                     Spacer(modifier = Modifier.height(ZipSlideTheme.spacing.s12))
                 }
@@ -533,10 +516,9 @@ fun BrowserScreen(
             } else {
                 // Main 2-column Grid (4:5 ratio, 12dp gap, 20dp gutter)
                 val columnsCount = when (settings.viewMode) {
-                    ViewMode.SMALL -> 3
-                    ViewMode.MEDIUM -> 2
-                    ViewMode.LARGE -> 1
-                    ViewMode.LIST -> 1
+                    ViewMode.GRID_SMALL -> 3
+                    ViewMode.GRID_MEDIUM -> 2
+                    ViewMode.GRID_LARGE, ViewMode.LIST -> 1
                 }
 
                 LazyVerticalGrid(
@@ -561,21 +543,21 @@ fun BrowserScreen(
                             isSelectionMode = isSelectionMode,
                             onClick = {
                                 if (isSelectionMode) {
-                                    if (isSelected) selectedZipPaths.remove(zip.path)
-                                    else selectedZipPaths.add(zip.path)
-                                    if (selectedZipPaths.isEmpty()) isSelectionMode = false
+                                    toggleSelection(zip.path)
                                 } else {
                                     actions.onPlaySlideshow(zip)
                                 }
                             },
                             onLongClick = {
                                 if (isSelectionMode) {
-                                    if (isSelected) selectedZipPaths.remove(zip.path)
-                                    else selectedZipPaths.add(zip.path)
+                                    toggleSelection(zip.path)
                                 } else {
-                                    selectedZipForSheet = zip
+                                    fallbackSheetTarget = zip
+                                    onEvent(BrowserEvent.CardLongPress(zip))
                                 }
-                            }
+                            },
+                            thumbnailPx = settings.thumbnailPx,
+                            loadThumbnail = { zipRepository.thumbnail(zip, settings.thumbnailPx) }
                         )
                     }
                 }
@@ -586,7 +568,10 @@ fun BrowserScreen(
                 ActionSheet(
                     zipItem = selectedZipForSheet,
                     sheetState = sheetState,
-                    onDismissRequest = { selectedZipForSheet = null },
+                    onDismissRequest = {
+                        fallbackSheetTarget = null
+                        onEvent(BrowserEvent.SheetDismiss)
+                    },
                     actions = actions
                 )
             }
@@ -603,14 +588,8 @@ fun BrowserScreen(
                     onConfirm = { newName ->
                         val target = renameZip!!
                         renameZip = null
-                        scope.launch {
-                            val result = zipRepository.renameZip(target, newName)
-                            if (result.isSuccess) {
-                                snackbarHostState.showSnackbar("Renamed to $newName.zip")
-                            } else {
-                                snackbarHostState.showSnackbar("Rename failed: ${result.exceptionOrNull()?.message}")
-                            }
-                        }
+                        onEvent(BrowserEvent.Rename(target, newName))
+                        scope.launch { snackbarHostState.showSnackbar("Renaming $newName.zip") }
                     },
                     onDismiss = { renameZip = null }
                 )
@@ -626,14 +605,8 @@ fun BrowserScreen(
                     onConfirm = {
                         val target = deleteZipTarget!!
                         deleteZipTarget = null
-                        scope.launch {
-                            val result = zipRepository.deleteZip(target)
-                            if (result.isSuccess) {
-                                snackbarHostState.showSnackbar("Deleted ${target.name}")
-                            } else {
-                                snackbarHostState.showSnackbar("Delete failed: ${result.exceptionOrNull()?.message}")
-                            }
-                        }
+                        onEvent(BrowserEvent.Delete(target))
+                        scope.launch { snackbarHostState.showSnackbar("Deleting ${target.name}") }
                     },
                     onDismiss = { deleteZipTarget = null }
                 )
@@ -649,17 +622,10 @@ fun BrowserScreen(
                     onConfirm = {
                         isDeletingSelection = false
                         val targets = selectedZipPaths.toList()
-                        isSelectionMode = false
-                        selectedZipPaths.clear()
-                        scope.launch {
-                            for (p in targets) {
-                                val item = zips.find { it.path == p }
-                                if (item != null) {
-                                    zipRepository.deleteZip(item)
-                                }
-                            }
-                            snackbarHostState.showSnackbar("Deleted ${targets.size} zips")
-                        }
+                        clearSelection()
+                        targets.mapNotNull { path -> zips.find { it.path == path } }
+                            .forEach { onEvent(BrowserEvent.Delete(it)) }
+                        scope.launch { snackbarHostState.showSnackbar("Deleting ${targets.size} zips") }
                     },
                     onDismiss = { isDeletingSelection = false }
                 )
@@ -685,14 +651,19 @@ fun BrowserScreen(
                 SearchOverlay(
                     allZips = zips,
                     query = searchQuery,
-                    onQueryChange = { searchQuery = it },
+                    onQueryChange = {
+                        fallbackSearchQuery = it
+                        onEvent(BrowserEvent.SearchChange(it))
+                    },
                     onClose = {
                         searchOpen = false
-                        searchQuery = ""
+                        fallbackSearchQuery = ""
+                        onEvent(BrowserEvent.SearchChange(""))
                     },
                     onZipSelected = { zip ->
                         searchOpen = false
-                        searchQuery = ""
+                        fallbackSearchQuery = ""
+                        onEvent(BrowserEvent.SearchChange(""))
                         actions.onPlaySlideshow(zip)
                     }
                 )

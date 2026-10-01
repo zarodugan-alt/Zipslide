@@ -53,8 +53,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.AppSettings
-import com.example.data.SettingsRepository
-import com.example.data.ZipRepository
 import com.example.data.model.SortBy
 import com.example.data.model.ViewMode
 import com.example.design.ZipSlideTheme
@@ -62,15 +60,14 @@ import com.example.ui.components.ConfirmDialog
 import com.example.ui.components.SectionHeader
 import com.example.ui.components.formatBytes
 import kotlinx.coroutines.launch
-import java.io.File
 
 @Composable
 fun SettingsScreen(
     settings: AppSettings,
-    settingsRepository: SettingsRepository,
-    zipRepository: ZipRepository,
     onNavigateToDiagnostics: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    cacheSizeBytes: Long = 0L,
+    onEvent: (SettingsEvent) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -81,12 +78,8 @@ fun SettingsScreen(
     var showLicensesDialog by remember { mutableStateOf(false) }
     var sortDropdownOpen by remember { mutableStateOf(false) }
 
-    // Calculate cache directory size
-    val cacheSize = remember {
-        val dir = File(context.filesDir, "thumbs")
-        val size = dir.listFiles()?.sumOf { it.length() } ?: 0L
-        formatBytes(size)
-    }
+    // Repository calculates cache size on Dispatchers.IO; the screen only formats immutable state.
+    val cacheSize = formatBytes(cacheSizeBytes)
 
     val folderPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree()
@@ -96,11 +89,8 @@ fun SettingsScreen(
                 uri,
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
             )
-            scope.launch {
-                settingsRepository.updateCustomScanFolder(uri.toString())
-                zipRepository.triggerRescan()
-                snackbarHostState.showSnackbar("Scan folder set")
-            }
+            onEvent(SettingsEvent.SetCustomScanFolder(uri.toString()))
+            scope.launch { snackbarHostState.showSnackbar("Scan folder set") }
         }
     }
 
@@ -151,9 +141,9 @@ fun SettingsScreen(
                 SettingRow(label = "Theme") {
                     SegmentedButtons(
                         options = listOf("Dark", "Light", "System"),
-                        selected = settings.theme.replaceFirstChar { it.uppercase() },
+                        selected = settings.theme.name.lowercase().replaceFirstChar { it.uppercase() },
                         onSelect = {
-                            scope.launch { settingsRepository.updateTheme(it.lowercase()) }
+                            onEvent(SettingsEvent.SetTheme(it.lowercase()))
                         }
                     )
                 }
@@ -164,17 +154,17 @@ fun SettingsScreen(
                     SegmentedButtons(
                         options = listOf("S", "M", "L"),
                         selected = when (settings.viewMode) {
-                            ViewMode.SMALL -> "S"
-                            ViewMode.MEDIUM -> "M"
-                            else -> "L"
+                            ViewMode.GRID_SMALL -> "S"
+                            ViewMode.GRID_MEDIUM -> "M"
+                            ViewMode.GRID_LARGE, ViewMode.LIST -> "L"
                         },
                         onSelect = {
                             val mode = when (it) {
-                                "S" -> ViewMode.SMALL
-                                "M" -> ViewMode.MEDIUM
-                                else -> ViewMode.LARGE
+                                "S" -> ViewMode.GRID_SMALL
+                                "M" -> ViewMode.GRID_MEDIUM
+                                else -> ViewMode.GRID_LARGE
                             }
-                            scope.launch { settingsRepository.updateViewMode(mode) }
+                            onEvent(SettingsEvent.SetViewMode(mode))
                         }
                     )
                 }
@@ -184,7 +174,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     label = "Show filenames on cards",
                     checked = settings.showFilenames,
-                    onCheckedChange = { scope.launch { settingsRepository.updateShowFilenames(it) } }
+                    onCheckedChange = { onEvent(SettingsEvent.SetShowFilenames(it)) }
                 )
             }
 
@@ -192,7 +182,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     label = "Show volume & cover badges",
                     checked = settings.showBadges,
-                    onCheckedChange = { scope.launch { settingsRepository.updateShowBadges(it) } }
+                    onCheckedChange = { onEvent(SettingsEvent.SetShowBadges(it)) }
                 )
             }
 
@@ -223,10 +213,7 @@ fun SettingsScreen(
                                     text = { Text(sortOption.name.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }, color = ZipSlideTheme.colors.textPrimary) },
                                     onClick = {
                                         sortDropdownOpen = false
-                                        scope.launch {
-                                            settingsRepository.updateSortBy(sortOption)
-                                            zipRepository.triggerRescan()
-                                        }
+                                        onEvent(SettingsEvent.SetSort(sortOption))
                                     }
                                 )
                             }
@@ -239,7 +226,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     label = "Ascending order",
                     checked = settings.sortAscending,
-                    onCheckedChange = { scope.launch { settingsRepository.updateSortAscending(it) } }
+                    onCheckedChange = { onEvent(SettingsEvent.SetAscending(it)) }
                 )
             }
 
@@ -247,7 +234,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     label = "Natural sort (2 before 10)",
                     checked = settings.naturalSort,
-                    onCheckedChange = { scope.launch { settingsRepository.updateNaturalSort(it) } }
+                    onCheckedChange = { onEvent(SettingsEvent.SetNaturalSort(it)) }
                 )
             }
 
@@ -271,10 +258,7 @@ fun SettingsScreen(
                                 "SD" -> "sd"
                                 else -> "all"
                             }
-                            scope.launch {
-                                settingsRepository.updateStorageSource(src)
-                                zipRepository.triggerRescan()
-                            }
+                            onEvent(SettingsEvent.SetStorageSource(src))
                         }
                     )
                 }
@@ -307,10 +291,7 @@ fun SettingsScreen(
                     label = "Include subfolders",
                     checked = settings.includeSubfolders,
                     onCheckedChange = {
-                        scope.launch {
-                            settingsRepository.updateIncludeSubfolders(it)
-                            zipRepository.triggerRescan()
-                        }
+                        onEvent(SettingsEvent.SetIncludeSubfolders(it))
                     }
                 )
             }
@@ -320,10 +301,7 @@ fun SettingsScreen(
                     label = "Show hidden files",
                     checked = settings.showHidden,
                     onCheckedChange = {
-                        scope.launch {
-                            settingsRepository.updateShowHidden(it)
-                            zipRepository.triggerRescan()
-                        }
+                        onEvent(SettingsEvent.SetShowHidden(it))
                     }
                 )
             }
@@ -370,7 +348,7 @@ fun SettingsScreen(
                     }
                     Slider(
                         value = settings.slideshowInterval,
-                        onValueChange = { scope.launch { settingsRepository.updateSlideshowInterval(it) } },
+                        onValueChange = { onEvent(SettingsEvent.SetSlideInterval(it)) },
                         valueRange = 0.5f..15.0f,
                         steps = 29,
                         colors = SliderDefaults.colors(
@@ -386,7 +364,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     label = "Shuffle order",
                     checked = settings.slideshowShuffle,
-                    onCheckedChange = { scope.launch { settingsRepository.updateSlideshowShuffle(it) } }
+                    onCheckedChange = { onEvent(SettingsEvent.SetShuffle(it)) }
                 )
             }
 
@@ -394,7 +372,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     label = "Loop playback",
                     checked = settings.slideshowLoop,
-                    onCheckedChange = { scope.launch { settingsRepository.updateSlideshowLoop(it) } }
+                    onCheckedChange = { onEvent(SettingsEvent.SetLoop(it)) }
                 )
             }
 
@@ -402,7 +380,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     label = "Fit to screen (preserve aspect ratio)",
                     checked = settings.slideshowFitToScreen,
-                    onCheckedChange = { scope.launch { settingsRepository.updateSlideshowFitToScreen(it) } }
+                    onCheckedChange = { onEvent(SettingsEvent.SetFitToScreen(it)) }
                 )
             }
 
@@ -410,7 +388,7 @@ fun SettingsScreen(
                 SettingSwitchRow(
                     label = "Keep screen on while playing",
                     checked = settings.slideshowKeepScreenOn,
-                    onCheckedChange = { scope.launch { settingsRepository.updateSlideshowKeepScreenOn(it) } }
+                    onCheckedChange = { onEvent(SettingsEvent.SetKeepScreenOn(it)) }
                 )
             }
 
@@ -438,7 +416,7 @@ fun SettingsScreen(
                     }
                     Slider(
                         value = settings.thumbnailPx.toFloat(),
-                        onValueChange = { scope.launch { settingsRepository.updateThumbnailPx(it.toInt()) } },
+                        onValueChange = { onEvent(SettingsEvent.SetThumbnailPx(it.toInt())) },
                         valueRange = 256f..1024f,
                         steps = 3,
                         colors = SliderDefaults.colors(
@@ -534,10 +512,8 @@ fun SettingsScreen(
             isDestructive = true,
             onConfirm = {
                 showClearCacheConfirm = false
-                scope.launch {
-                    zipRepository.clearThumbnailCache()
-                    snackbarHostState.showSnackbar("Cache cleared")
-                }
+                onEvent(SettingsEvent.ClearThumbnailCache)
+                scope.launch { snackbarHostState.showSnackbar("Cache cleared") }
             },
             onDismiss = { showClearCacheConfirm = false }
         )
@@ -550,10 +526,8 @@ fun SettingsScreen(
             confirmText = "Regenerate",
             onConfirm = {
                 showRegenerateConfirm = false
-                scope.launch {
-                    zipRepository.clearThumbnailCache()
-                    snackbarHostState.showSnackbar("Regenerating thumbnails…")
-                }
+                onEvent(SettingsEvent.RegenerateThumbnails)
+                scope.launch { snackbarHostState.showSnackbar("Regenerating thumbnails…") }
             },
             onDismiss = { showRegenerateConfirm = false }
         )

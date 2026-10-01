@@ -59,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.ZipRepository
+import com.example.data.toUserMessage
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.design.ZipSlideTheme
@@ -67,21 +68,26 @@ import com.example.ui.components.formatBytes
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 @Composable
 fun ZipContentsScreen(
     zipPath: String,
     zipRepository: ZipRepository,
     onNavigateToSlideshow: (zipPath: String, frameIndex: Int) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    state: ZipContentsState? = null,
+    onEvent: (ZipContentsEvent) -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var entries by remember { mutableStateOf<List<ZipEntryItem>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    var zipItem by remember { mutableStateOf<ZipItem?>(null) }
+    // Local fallback preserves the reusable screen preview; app navigation supplies immutable state.
+    var localEntries by remember { mutableStateOf<List<ZipEntryItem>>(emptyList()) }
+    var localLoading by remember { mutableStateOf(true) }
+    var localZipItem by remember { mutableStateOf<ZipItem?>(null) }
+    val entries = state?.entries ?: localEntries
+    val isLoading = state?.loading ?: localLoading
+    val zipItem = state?.zip ?: localZipItem
     var expandOtherFiles by remember { mutableStateOf(false) }
 
     // Progress sheet for extraction
@@ -93,23 +99,26 @@ fun ZipContentsScreen(
     // Thumbnails memory cache for content items
     val thumbs = remember { mutableStateMapOf<String, androidx.compose.ui.graphics.ImageBitmap>() }
 
-    LaunchedEffect(zipPath) {
-        withContext(Dispatchers.IO) {
-            val fileName = zipPath.substringAfterLast(File.separatorChar)
-            val file = File(zipPath)
-            val item = ZipItem(
-                path = zipPath,
-                name = fileName,
-                size = if (file.exists()) file.length() else 0L,
-                lastModified = if (file.exists()) file.lastModified() else 0L,
-                volumeId = "internal",
-                volumeName = "Storage",
-                isSaf = zipPath.startsWith("content://")
-            )
-            zipItem = item
-            entries = zipRepository.getZipEntries(item)
-            isLoading = false
+    LaunchedEffect(zipPath, state != null) {
+        if (state != null) {
+            onEvent(ZipContentsEvent.Load(zipPath))
+        } else {
+            // Preview/reuse fallback; repository methods do their disk work on Dispatchers.IO.
+            val item = zipRepository.findZipItem(zipPath) ?: run {
+                ZipItem(
+                    path = zipPath, name = zipPath.substringAfterLast('/'),
+                    size = 0L, lastModified = 0L,
+                    volumeId = "primary", volumeName = "Internal storage", isSaf = zipPath.startsWith("content://")
+                )
+            }
+            localZipItem = item
+            localEntries = zipRepository.getZipEntries(item)
+            localLoading = false
         }
+    }
+
+    LaunchedEffect(state?.error) {
+        state?.error?.let { snackbarHostState.showSnackbar(it) }
     }
 
     val imageEntries = remember(entries) { entries.filter { it.isImage } }
@@ -140,7 +149,7 @@ fun ZipContentsScreen(
                 }
                 Spacer(modifier = Modifier.width(ZipSlideTheme.spacing.s8))
                 Text(
-                    text = zipPath.substringAfterLast(File.separatorChar),
+                    text = zipPath.substringAfterLast('/'),
                     style = ZipSlideTheme.typography.titleM,
                     color = ZipSlideTheme.colors.textPrimary,
                     maxLines = 1,
@@ -223,7 +232,7 @@ fun ZipContentsScreen(
                                             if (result.isSuccess) {
                                                 snackbarHostState.showSnackbar("Extracted to ${result.getOrNull()?.name}")
                                             } else {
-                                                snackbarHostState.showSnackbar("Extraction failed: ${result.exceptionOrNull()?.message}")
+                                                snackbarHostState.showSnackbar(result.exceptionOrNull()?.toUserMessage() ?: "That operation could not be completed. Try again.")
                                             }
                                         }
                                     },

@@ -77,6 +77,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.AppSettings
 import com.example.data.ZipRepository
+import com.example.data.toUserMessage
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.design.ZipSlideTheme
@@ -84,7 +85,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 import kotlin.random.Random
 
 @Composable
@@ -93,22 +93,28 @@ fun SlideshowScreen(
     initialFrameIndex: Int = 0,
     settings: AppSettings,
     zipRepository: ZipRepository,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    state: SlideshowState? = null,
+    onEvent: (SlideshowEvent) -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val activity = context as? Activity
 
-    var zipItem by remember { mutableStateOf<ZipItem?>(null) }
-    var entries by remember { mutableStateOf<List<ZipEntryItem>>(emptyList()) }
-    var isLoadingEntries by remember { mutableStateOf(true) }
+    var localZipItem by remember { mutableStateOf<ZipItem?>(null) }
+    var localEntries by remember { mutableStateOf<List<ZipEntryItem>>(emptyList()) }
+    var localLoadingEntries by remember { mutableStateOf(true) }
+    val zipItem = state?.zip ?: localZipItem
+    val entries = state?.images ?: localEntries
+    val isLoadingEntries = state?.loading ?: localLoadingEntries
+    val effectiveSettings = state?.settings ?: settings
 
-    // Playback state
+    // Playback controls are transient UI state; their persisted defaults arrive in state.
     var isPlaying by remember { mutableStateOf(true) }
-    var isShuffle by remember { mutableStateOf(settings.slideshowShuffle) }
-    var isLoop by remember { mutableStateOf(settings.slideshowLoop) }
-    var fitToScreen by remember { mutableStateOf(settings.slideshowFitToScreen) }
-    var intervalSeconds by remember { mutableFloatStateOf(settings.slideshowInterval) }
+    var isShuffle by remember(effectiveSettings.slideShuffle) { mutableStateOf(effectiveSettings.slideShuffle) }
+    var isLoop by remember(effectiveSettings.slideLoop) { mutableStateOf(effectiveSettings.slideLoop) }
+    var fitToScreen by remember(effectiveSettings.slideFitToScreen) { mutableStateOf(effectiveSettings.slideFitToScreen) }
+    var intervalSeconds by remember(effectiveSettings.slideIntervalMs) { mutableFloatStateOf(effectiveSettings.slideshowInterval) }
 
     // Chrome visibility: zero chrome on entry, auto-hides after 3s
     var chromeVisible by remember { mutableStateOf(false) }
@@ -117,30 +123,32 @@ fun SlideshowScreen(
     // Bitmap cache: max 3 bitmaps in memory
     val bitmapCache = remember { mutableStateMapOf<Int, Bitmap>() }
 
-    // Load zip and image entries
-    LaunchedEffect(zipPath) {
-        withContext(Dispatchers.IO) {
-            val fileName = zipPath.substringAfterLast(File.separatorChar)
-            val mockZip = ZipItem(
-                path = zipPath,
-                name = fileName,
-                size = 0L,
-                lastModified = 0L,
-                volumeId = "internal",
-                volumeName = "Storage",
-                isSaf = zipPath.startsWith("content://")
-            )
-            zipItem = mockZip
-            val allEntries = zipRepository.getZipEntries(mockZip)
-            val imagesOnly = allEntries.filter { it.isImage }
-            entries = imagesOnly
-            isLoadingEntries = false
+    // Load real Room-backed metadata and archive entries through the screen state owner.
+    LaunchedEffect(zipPath, state != null) {
+        if (state != null) {
+            onEvent(SlideshowEvent.Load(zipPath))
+        } else {
+            val item = zipRepository.findZipItem(zipPath) ?: run {
+                ZipItem(
+                    path = zipPath, name = zipPath.substringAfterLast('/'),
+                    size = 0L, lastModified = 0L,
+                    volumeId = "primary", volumeName = "Internal storage", isSaf = zipPath.startsWith("content://")
+                )
+            }
+            zipRepository.beginPlayback(item)
+            localZipItem = item
+            localEntries = zipRepository.getZipEntries(item).filter { it.isImage }
+            localLoadingEntries = false
         }
     }
 
+    LaunchedEffect(state?.error) {
+        state?.error?.let { Toast.makeText(context, it, Toast.LENGTH_SHORT).show() }
+    }
+
     // Keep screen on while playing
-    DisposableEffect(settings.slideshowKeepScreenOn, isPlaying) {
-        if (settings.slideshowKeepScreenOn && isPlaying) {
+    DisposableEffect(effectiveSettings.slideKeepScreenOn, isPlaying) {
+        if (effectiveSettings.slideKeepScreenOn && isPlaying) {
             activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         }
         onDispose {
@@ -159,7 +167,7 @@ fun SlideshowScreen(
                 CircularProgressIndicator(color = ZipSlideTheme.colors.accent)
                 Spacer(modifier = Modifier.height(ZipSlideTheme.spacing.s16))
                 Text(
-                    text = zipPath.substringAfterLast(File.separatorChar),
+                    text = zipPath.substringAfterLast('/'),
                     style = ZipSlideTheme.typography.caption,
                     color = ZipSlideTheme.colors.textTertiary
                 )
@@ -217,12 +225,22 @@ fun SlideshowScreen(
     // Save resume index
     DisposableEffect(pagerState.currentPage) {
         val currentFrame = displayIndices[pagerState.currentPage]
-        scope.launch {
-            zipRepository.updateLastFrame(zipPath, currentFrame)
-        }
+        if (state != null) onEvent(SlideshowEvent.FrameChanged(zipPath, currentFrame))
+        else scope.launch { zipRepository.updateLastFrame(zipPath, currentFrame) }
         onDispose {
-            scope.launch {
-                zipRepository.updateLastFrame(zipPath, currentFrame)
+            if (state != null) onEvent(SlideshowEvent.FrameChanged(zipPath, currentFrame))
+            else scope.launch { zipRepository.updateLastFrame(zipPath, currentFrame) }
+        }
+    }
+
+    // Persist a single completed viewing session when this destination leaves the back stack.
+    DisposableEffect(zipPath) {
+        onDispose {
+            val currentFrame = displayIndices.getOrNull(pagerState.currentPage) ?: 0
+            if (state != null) onEvent(SlideshowEvent.Finish(zipPath, currentFrame))
+            else scope.launch {
+                zipRepository.finishWatching(zipPath, currentFrame)
+                zipRepository.endPlayback(zipPath)
             }
         }
     }
@@ -303,7 +321,7 @@ fun SlideshowScreen(
                     }
                 } catch (e: Exception) {
                     withContext(Dispatchers.Main) {
-                        Toast.makeText(context, "Failed to save: ${e.message}", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, e.toUserMessage(), Toast.LENGTH_SHORT).show()
                     }
                 }
             }
@@ -423,7 +441,7 @@ fun SlideshowScreen(
                         modifier = Modifier.weight(1f)
                     ) {
                         Text(
-                            text = zipPath.substringAfterLast(File.separatorChar),
+                            text = zipPath.substringAfterLast('/'),
                             style = ZipSlideTheme.typography.titleM,
                             color = Color.White,
                             maxLines = 1,

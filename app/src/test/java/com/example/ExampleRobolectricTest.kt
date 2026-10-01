@@ -9,7 +9,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+// Robolectric 4.16 does not provide an Android 16 (API 36) system image.
+// The test only validates app resources, so the latest supported API is sufficient.
+@Config(sdk = [35])
 class ExampleRobolectricTest {
 
   @Test

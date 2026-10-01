@@ -1,32 +1,47 @@
 package com.example.data
 
-import android.content.Context
+import android.app.Application
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color as AndroidColor
-import android.graphics.Paint
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.util.LruCache
+import androidx.core.content.FileProvider
+import com.example.data.local.ScanCacheDao
+import com.example.data.local.ScanCacheEntry
 import com.example.data.local.ZipMetaDao
 import com.example.data.local.ZipMetaEntity
-import com.example.data.model.BrowserFilter
 import com.example.data.model.SortBy
-import com.example.data.model.StorageVolumeInfo
+import com.example.data.model.Volume
+import com.example.data.model.VolumeFilter
+import com.example.data.model.ZipEntryInfo
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.util.NaturalOrderComparator
+import com.example.util.naturalKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.BufferedInputStream
 import java.io.ByteArrayOutputStream
@@ -36,963 +51,625 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.util.zip.ZipEntry
+import java.util.zip.ZipException
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
+import kotlin.coroutines.coroutineContext
 
+private val IMAGE_EXT = setOf("jpg", "jpeg", "png", "webp", "bmp", "gif", "heic", "heif")
+private const val SCAN_BATCH_SIZE = 50
+
+sealed interface ScanProgress {
+    data object Idle : ScanProgress
+    data class Scanning(val volumesDone: Int, val volumesTotal: Int, val found: Int) : ScanProgress
+    data class Done(val total: Int, val elapsedMs: Long) : ScanProgress
+    data class Failed(val error: Throwable) : ScanProgress
+}
+
+data class ExtractProgress(val done: Int, val total: Int, val currentName: String)
+
+sealed class ZipSlideError(message: String? = null, cause: Throwable? = null) : Exception(message, cause) {
+    class PermissionDenied(val path: String) : ZipSlideError(path)
+    class FileNotFound(val path: String) : ZipSlideError(path)
+    class CorruptZip(val path: String, cause: Throwable) : ZipSlideError(path, cause)
+    class EncryptedZip(val path: String) : ZipSlideError(path)
+    class ReadOnly(val path: String) : ZipSlideError(path)
+    class OutOfSpace : ZipSlideError()
+    class SafAccessLost(val uri: Uri) : ZipSlideError(uri.toString())
+}
+
+fun ZipSlideError.toUserMessage(): String = when (this) {
+    is ZipSlideError.PermissionDenied -> "Storage permission is required to read this folder."
+    is ZipSlideError.FileNotFound -> "This archive is no longer available."
+    is ZipSlideError.CorruptZip -> "This archive is corrupt and could not be opened."
+    is ZipSlideError.EncryptedZip -> "This archive is encrypted and cannot be read."
+    is ZipSlideError.ReadOnly -> "This folder is read-only."
+    is ZipSlideError.OutOfSpace -> "There is not enough free storage for this operation."
+    is ZipSlideError.SafAccessLost -> "Access to the selected folder was lost. Choose it again in Settings."
+}
+
+/** The only UI-facing error translation. Never expose filesystem or parser exception text. */
+fun Throwable.toUserMessage(): String = (this as? ZipSlideError)?.toUserMessage()
+    ?: "That operation could not be completed. Try again."
+
+/**
+ * Disk and archive access layer. All blocking work is explicitly dispatched to IO; Room flows are
+ * the source of truth so the browser can render cached rows before a revalidation completes.
+ */
 class ZipRepository(
-    private val context: Context,
+    private val app: Application,
+    private val settingsRepository: SettingsRepository,
     private val zipMetaDao: ZipMetaDao,
-    private val volumeRepository: VolumeRepository,
-    private val settingsRepository: SettingsRepository
+    private val scanCacheDao: ScanCacheDao,
+    private val volumeRepository: VolumeRepository
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val thumbDir = File(context.filesDir, "thumbs").apply { mkdirs() }
-
-    private val _rawZips = MutableStateFlow<List<ZipItem>>(emptyList())
+    private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val scanDispatcher = Dispatchers.IO.limitedParallelism(4)
+    private val thumbnailDispatcher = Dispatchers.IO.limitedParallelism(4)
+    private val thumbsDir = File(app.filesDir, "thumbs").apply { mkdirs() }
+    private val memoryCache = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 8L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
+    }
+    private val inFlightMutex = Mutex()
+    private val inFlight = mutableMapOf<String, kotlinx.coroutines.Deferred<Bitmap?>>()
+    private val playbackMutex = Mutex()
+    private val playbackArchives = mutableMapOf<String, ZipFile>()
+    private val scanMutex = Mutex()
+    private val _scanProgress = MutableStateFlow<ScanProgress>(ScanProgress.Idle)
     private val _isScanning = MutableStateFlow(false)
+
+    val scanProgress: StateFlow<ScanProgress> = _scanProgress.asStateFlow()
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
 
-    // Combined Flow containing sorted and filtered items for UI
-    val zipsFlow = combine(
-        _rawZips,
-        settingsRepository.settingsFlow,
-        volumeRepository.volumes
-    ) { zips, settings, volumes ->
-        val volumeMap = volumes.associateBy { it.id }
-
-        // Update mount states according to active volumes
-        val processedZips = zips.map { zip ->
-            val vol = volumeMap[zip.volumeId]
-            val isMounted = vol?.isMounted ?: volumeRepository.isPathMounted(zip.path)
-            zip.copy(isMounted = isMounted)
+    private val cachedWithMeta: Flow<List<Pair<ScanCacheEntry, ZipMetaEntity?>>> =
+        combine(scanCacheDao.observeAll(), zipMetaDao.observeAll()) { scans, metas ->
+            val metaByPath = metas.associateBy { it.path }
+            scans.map { it to metaByPath[it.path] }
         }
 
-        // Apply storage source filter
-        val sourceFiltered = when (settings.storageSource) {
-            "internal" -> processedZips.filter { it.volumeId == "internal" || !it.volumeId.contains("sd", ignoreCase = true) }
-            "sd" -> processedZips.filter { it.volumeId.contains("sd", ignoreCase = true) }
-            else -> processedZips
-        }
-
-        // Apply sort
-        sortZips(sourceFiltered, settings.sortBy, settings.sortAscending, settings.naturalSort)
-    }
+    /** Cached rows joined with metadata and current mount state. */
+    val zipsFlow: StateFlow<List<ZipItem>> = combine(
+        cachedWithMeta,
+        volumeRepository.observeVolumes(),
+        settingsRepository.settings
+    ) { cached, volumes, settings ->
+        val list = cached.map { (scan, meta) -> scan.toZipItem(meta, volumes) }
+        list
+            .filter { item -> item.matchesFilter(settings.volumeFilter) }
+            .sort(settings.sortBy, settings.ascending, settings.naturalSort, stableSeed = 0L)
+    }.distinctUntilChanged().stateIn(repositoryScope, SharingStarted.Eagerly, emptyList())
 
     init {
-        // Instant cold start: Load metadata from Room immediately
-        scope.launch {
-            loadFromDbCache()
-            ensureSampleZipsExist()
-            triggerRescan()
+        // Room emits immediately; revalidation runs separately and never blocks first composition.
+        repositoryScope.launch { rescanNow() }
+        repositoryScope.launch {
+            volumeRepository.onMountChanged().collect { rescanNow() }
         }
     }
 
-    private suspend fun loadFromDbCache() = withContext(Dispatchers.IO) {
-        val cachedEntities = zipMetaDao.getAllMetaList()
-        if (cachedEntities.isNotEmpty()) {
-            val cachedZips = cachedEntities.map { entity ->
-                val file = if (!entity.isSaf) File(entity.path) else null
-                val exists = file?.exists() ?: true
-                val thumbFile = getCacheFileForPath(entity.path, entity.lastModified, file?.length() ?: 0L, 512)
-                ZipItem(
-                    path = entity.path,
-                    name = file?.name ?: entity.path.substringAfterLast('/'),
-                    size = entity.cachedTotalSize,
-                    lastModified = entity.lastModified,
-                    volumeId = entity.volumeId,
-                    volumeName = if (entity.volumeId == "internal") "Internal storage" else "SD card",
-                    isMounted = exists && volumeRepository.isPathMounted(entity.path),
-                    isSaf = entity.isSaf,
-                    imageCount = entity.cachedImageCount,
-                    hasCover = entity.hasCover,
-                    coverEntryName = entity.coverEntryName,
-                    thumbnailPath = if (thumbFile.exists()) thumbFile.absolutePath else null,
-                    isFavorite = entity.isFavorite,
-                    lastFrameIndex = entity.lastFrameIndex,
-                    isReadOnly = file != null && (!file.canWrite() || !file.parentFile.canWrite()),
-                    parentFolder = file?.parent ?: ""
-                )
-            }
-            _rawZips.value = cachedZips
-        }
-    }
+    fun observeCached(): Flow<List<ZipItem>> = zipsFlow
 
-    fun triggerRescan() {
-        scope.launch {
-            scanStorage()
-        }
-    }
+    fun scan(): Flow<ScanProgress> = flow {
+        emit(ScanProgress.Scanning(0, volumeRepository.currentVolumes().count { it.isMounted }, 0))
+        rescanNow()
+        emit(scanProgress.value)
+    }.flowOn(Dispatchers.IO)
 
-    fun updateMountStates() {
-        val current = _rawZips.value
-        _rawZips.value = current.map { zip ->
-            zip.copy(isMounted = volumeRepository.isPathMounted(zip.path))
-        }
-    }
+    fun triggerRescan() { repositoryScope.launch { rescanNow() } }
 
-    private suspend fun scanStorage() = withContext(Dispatchers.IO) {
-        if (_isScanning.value) return@withContext
+    /** Serial revalidation; cached facts are reused whenever file size and mtime are unchanged. */
+    suspend fun rescanNow() = scanMutex.withLock {
+        if (_isScanning.value) return
         _isScanning.value = true
-
+        val startedAt = System.currentTimeMillis()
         try {
-            val settings = settingsRepository.settingsFlow.first()
-            val volumes = volumeRepository.volumes.value
-            val foundZips = mutableListOf<ZipItem>()
-            val canonicalSeen = mutableSetOf<String>()
+            val settings = settingsRepository.settings.first()
+            volumeRepository.refreshVolumes()
+            val volumes = volumeRepository.currentVolumes()
+                .filter { it.isMounted && it.isReadable && it.matchesFilter(settings.volumeFilter) }
+            val existing = scanCacheDao.all().associateBy { it.path }
+            val liveByMountedVolume = mutableMapOf<String, MutableSet<String>>()
 
-            // 1. Scan direct file storage roots
-            val roots = mutableListOf<File>()
-            for (vol in volumes) {
-                if (vol.rootFile != null && vol.rootFile.exists() && vol.isMounted && vol.readableDirect) {
-                    roots.add(vol.rootFile)
-                }
-            }
-
-            // Also check custom scan folder if specified
-            if (settings.customScanFolderUri != null) {
-                runCatching {
-                    val customUri = Uri.parse(settings.customScanFolderUri)
-                    if (customUri.scheme == "file") {
-                        val customFile = File(customUri.path ?: "")
-                        if (customFile.exists() && customFile.isDirectory) {
-                            roots.add(customFile)
+            _scanProgress.value = ScanProgress.Scanning(0, volumes.size, 0)
+            var doneVolumes = 0
+            var found = 0
+            coroutineScope {
+                volumes.map { volume ->
+                    async(scanDispatcher) {
+                        val entries = scanDirectVolume(volume, settings, existing)
+                        synchronized(liveByMountedVolume) {
+                            liveByMountedVolume.getOrPut(volume.id) { linkedSetOf() }.addAll(entries.map { it.path })
                         }
-                    } else if (customUri.scheme == "content") {
-                        // Scan via SAF DocumentFile
-                        scanSafDirectory(customUri, foundZips, canonicalSeen, settings.thumbnailPx)
+                        entries
                     }
+                }.awaitAll().forEach { entries ->
+                    for (batch in entries.chunked(SCAN_BATCH_SIZE)) scanCacheDao.upsertAll(batch)
+                    doneVolumes++
+                    found += entries.size
+                    _scanProgress.value = ScanProgress.Scanning(doneVolumes, volumes.size, found)
                 }
             }
 
-            // Limit scan parallelism to 4 concurrent
-            val semaphore = Semaphore(4)
-            val existingMeta = zipMetaDao.getAllMetaList().associateBy { it.path }
-
-            for (root in roots) {
-                scanDirectoryRecursively(
-                    dir = root,
-                    volumeId = if (root.absolutePath.contains("emulated", ignoreCase = true)) "internal" else "sd",
-                    volumeName = if (root.absolutePath.contains("emulated", ignoreCase = true)) "Internal storage" else "SD card",
-                    includeSubfolders = settings.includeSubfolders,
-                    showHidden = settings.showHidden,
-                    foundZips = foundZips,
-                    canonicalSeen = canonicalSeen,
-                    existingMeta = existingMeta,
-                    thumbnailPx = settings.thumbnailPx,
-                    semaphore = semaphore
-                )
+            // SAF roots are independent of a removable volume. They remain available as long as
+            // their persisted grant is valid and are scanned recursively with the same cache rule.
+            settings.customScanRoots.forEach { root ->
+                val safEntries = scanSafRoot(Uri.parse(root), settings, existing)
+                for (batch in safEntries.chunked(SCAN_BATCH_SIZE)) scanCacheDao.upsertAll(batch)
+                val id = safVolumeId(root)
+                liveByMountedVolume.getOrPut(id) { linkedSetOf() }.addAll(safEntries.map { it.path })
+                found += safEntries.size
             }
 
-            // Update state
-            _rawZips.value = foundZips
-
-            // Persist to Room for instant cold starts
-            val entities = foundZips.map { zip ->
-                val old = existingMeta[zip.path]
-                ZipMetaEntity(
-                    path = zip.path,
-                    isFavorite = old?.isFavorite ?: false,
-                    lastFrameIndex = old?.lastFrameIndex ?: 0,
-                    customTitle = old?.customTitle,
-                    cachedImageCount = zip.imageCount,
-                    cachedTotalSize = zip.size,
-                    hasCover = zip.hasCover,
-                    coverEntryName = zip.coverEntryName,
-                    lastModified = zip.lastModified,
-                    volumeId = zip.volumeId,
-                    isSaf = zip.isSaf
-                )
-            }
-            zipMetaDao.insertAll(entities)
-
-            // Sweep obsolete thumbnails
-            sweepThumbnailCache(foundZips.map { it.path }.toSet())
-
-        } catch (e: Exception) {
-            e.printStackTrace()
+            // Preserve all cached rows for unmounted volumes. Only entries on a volume that was
+            // actually traversed can be considered missing and pruned.
+            val protectedPaths = existing.values
+                .filter { cache -> cache.volumeId !in liveByMountedVolume.keys }
+                .map { it.path }
+            val livePaths = (protectedPaths + liveByMountedVolume.values.flatten()).distinct()
+            scanCacheDao.pruneMissing(livePaths)
+            sweepThumbnailCache(livePaths.toSet())
+            _scanProgress.value = ScanProgress.Done(livePaths.size, System.currentTimeMillis() - startedAt)
+        } catch (error: Throwable) {
+            _scanProgress.value = ScanProgress.Failed(error)
         } finally {
             _isScanning.value = false
         }
     }
 
-    private suspend fun scanDirectoryRecursively(
-        dir: File,
-        volumeId: String,
-        volumeName: String,
-        includeSubfolders: Boolean,
-        showHidden: Boolean,
-        foundZips: MutableList<ZipItem>,
-        canonicalSeen: MutableSet<String>,
-        existingMeta: Map<String, ZipMetaEntity>,
-        thumbnailPx: Int,
-        semaphore: Semaphore
-    ) {
-        if (!dir.exists() || !dir.canRead()) return
-
-        val files = dir.listFiles() ?: return
-        for (file in files) {
-            val name = file.name
-            // Always skip: Android/, .thumbnails, dotdirs
-            if (name.equals("Android", ignoreCase = true) ||
-                name.equals(".thumbnails", ignoreCase = true) ||
-                (name.startsWith(".") && !showHidden)
-            ) {
-                continue
-            }
-
-            if (file.isDirectory) {
-                if (includeSubfolders) {
-                    scanDirectoryRecursively(
-                        dir = file,
-                        volumeId = volumeId,
-                        volumeName = volumeName,
-                        includeSubfolders = includeSubfolders,
-                        showHidden = showHidden,
-                        foundZips = foundZips,
-                        canonicalSeen = canonicalSeen,
-                        existingMeta = existingMeta,
-                        thumbnailPx = thumbnailPx,
-                        semaphore = semaphore
-                    )
-                }
-            } else if (name.endsWith(".zip", ignoreCase = true)) {
-                val canon = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
-                if (canonicalSeen.add(canon)) {
-                    val zipItem = inspectZipFile(
-                        file = file,
-                        volumeId = volumeId,
-                        volumeName = volumeName,
-                        existingMeta = existingMeta[canon],
-                        thumbnailPx = thumbnailPx,
-                        semaphore = semaphore
-                    )
-                    foundZips.add(zipItem)
+    private suspend fun scanDirectVolume(
+        volume: Volume,
+        settings: AppSettings,
+        existing: Map<String, ScanCacheEntry>
+    ): List<ScanCacheEntry> = withContext(scanDispatcher) {
+        val root = volume.root ?: return@withContext emptyList()
+        val result = mutableListOf<ScanCacheEntry>()
+        fun walk(directory: File, depth: Int) {
+            coroutineContext.ensureActive()
+            if (depth > 8 || !directory.canRead()) return
+            directory.listFiles()?.forEach { file ->
+                val name = file.name
+                if (file.isDirectory) {
+                    if (name.equals("Android", true) || name.equals(".thumbnails", true) || (!settings.showHidden && name.startsWith('.'))) return@forEach
+                    if (settings.includeSubfolders) walk(file, depth + 1)
+                } else if (name.endsWith(".zip", true) && (settings.showHidden || !name.startsWith('.'))) {
+                    val path = file.canonicalOrAbsolute()
+                    val unchanged = existing[path]?.takeIf {
+                        it.sizeBytes == file.length() && it.lastModified == file.lastModified()
+                    }
+                    result += unchanged ?: inspectDirect(file, volume.id)
                 }
             }
         }
+        walk(root, 0)
+        result
     }
 
-    private suspend fun scanSafDirectory(
-        treeUri: Uri,
-        foundZips: MutableList<ZipItem>,
-        canonicalSeen: MutableSet<String>,
-        thumbnailPx: Int
-    ) = withContext(Dispatchers.IO) {
-        try {
-            val treeDocId = DocumentsContract.getTreeDocumentId(treeUri)
-            val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeDocId)
+    private suspend fun scanSafRoot(
+        root: Uri,
+        settings: AppSettings,
+        existing: Map<String, ScanCacheEntry>
+    ): List<ScanCacheEntry> = withContext(scanDispatcher) {
+        val result = mutableListOf<ScanCacheEntry>()
+        val volumeId = safVolumeId(root.toString())
+        fun visit(parentDocumentId: String, depth: Int) {
+            coroutineContext.ensureActive()
+            if (depth > 8) return
+            val children = DocumentsContract.buildChildDocumentsUriUsingTree(root, parentDocumentId)
             val projection = arrayOf(
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
                 DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                DocumentsContract.Document.COLUMN_MIME_TYPE,
                 DocumentsContract.Document.COLUMN_SIZE,
                 DocumentsContract.Document.COLUMN_LAST_MODIFIED
             )
-            context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
-                val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                val sizeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
-                val modCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            app.contentResolver.query(children, projection, null, null, null)?.use { cursor ->
+                val id = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                val displayName = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                val mime = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                val size = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_SIZE)
+                val modified = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
                 while (cursor.moveToNext()) {
-                    val docId = cursor.getString(idCol)
-                    val name = cursor.getString(nameCol) ?: ""
-                    val size = cursor.getLong(sizeCol)
-                    val lastModified = cursor.getLong(modCol)
-                    if (name.endsWith(".zip", ignoreCase = true)) {
-                        val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, docId)
-                        val uriStr = docUri.toString()
-                        if (canonicalSeen.add(uriStr)) {
-                            val zipItem = inspectSafZip(docUri, name, size, lastModified, thumbnailPx)
-                            foundZips.add(zipItem)
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    /**
-     * Inspect direct zip file using java.util.zip.ZipFile
-     * One bad zip never breaks the scan: catches per-zip exceptions cleanly.
-     */
-    private suspend fun inspectZipFile(
-        file: File,
-        volumeId: String,
-        volumeName: String,
-        existingMeta: ZipMetaEntity?,
-        thumbnailPx: Int,
-        semaphore: Semaphore
-    ): ZipItem = withContext(Dispatchers.IO) {
-        val path = runCatching { file.canonicalPath }.getOrDefault(file.absolutePath)
-        val lastModified = file.lastModified()
-        val fileLength = file.length()
-        val thumbFile = getCacheFileForPath(path, lastModified, fileLength, thumbnailPx)
-
-        var imageCount = existingMeta?.cachedImageCount ?: 0
-        var hasCover = existingMeta?.hasCover ?: true
-        var coverEntryName: String? = existingMeta?.coverEntryName
-        var isCorrupt = false
-        var isEncrypted = false
-        var isZeroImages = false
-
-        // If thumbnail exists and cache is valid, skip zip inspection
-        val needInspect = !thumbFile.exists() || existingMeta == null || existingMeta.lastModified != lastModified
-
-        if (needInspect) {
-            semaphore.withPermit {
-                try {
-                    ZipFile(file).use { zip ->
-                        val entries = mutableListOf<String>()
-                        val enumeration = zip.entries()
-                        while (enumeration.hasMoreElements()) {
-                            val entry = enumeration.nextElement()
-                            val entryName = entry.name
-                            if (!entry.isDirectory && isValidImageEntry(entryName)) {
-                                entries.add(entryName)
-                            }
-                        }
-
-                        imageCount = entries.size
-                        isZeroImages = entries.isEmpty()
-
-                        if (entries.isNotEmpty()) {
-                            val (resolvedCover, coverFound) = resolveCoverEntry(entries)
-                            coverEntryName = resolvedCover
-                            hasCover = coverFound
-
-                            if (resolvedCover != null) {
-                                val coverZipEntry = zip.getEntry(resolvedCover)
-                                if (coverZipEntry != null) {
-                                    zip.getInputStream(coverZipEntry).use { input ->
-                                        decodeAndSaveThumbnail(input, thumbFile, thumbnailPx)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) {
-                    val msg = e.message?.lowercase() ?: ""
-                    if (msg.contains("encrypted") || msg.contains("password")) {
-                        isEncrypted = true
-                    } else {
-                        isCorrupt = true
+                    val documentId = cursor.getString(id)
+                    val name = cursor.getString(displayName).orEmpty()
+                    val isDirectory = cursor.getString(mime) == DocumentsContract.Document.MIME_TYPE_DIR
+                    if (isDirectory) {
+                        if (name.equals("Android", true) || name.equals(".thumbnails", true) || (!settings.showHidden && name.startsWith('.'))) continue
+                        if (settings.includeSubfolders) visit(documentId, depth + 1)
+                    } else if (name.endsWith(".zip", true) && (settings.showHidden || !name.startsWith('.'))) {
+                        val uri = DocumentsContract.buildDocumentUriUsingTree(root, documentId)
+                        val path = uri.toString()
+                        val fileSize = cursor.getLong(size)
+                        val lastModified = cursor.getLong(modified)
+                        val unchanged = existing[path]?.takeIf { it.sizeBytes == fileSize && it.lastModified == lastModified }
+                        result += unchanged ?: inspectSaf(uri, name, fileSize, lastModified, volumeId)
                     }
                 }
             }
         }
-
-        val canWrite = file.canWrite() && (file.parentFile?.canWrite() != false)
-
-        ZipItem(
-            path = path,
-            name = file.name,
-            size = fileLength,
-            lastModified = lastModified,
-            volumeId = volumeId,
-            volumeName = volumeName,
-            isMounted = true,
-            isSaf = false,
-            imageCount = imageCount,
-            hasCover = hasCover,
-            coverEntryName = coverEntryName,
-            thumbnailPath = if (thumbFile.exists()) thumbFile.absolutePath else null,
-            isEncrypted = isEncrypted,
-            isCorrupt = isCorrupt,
-            isZeroImages = isZeroImages,
-            isFavorite = existingMeta?.isFavorite ?: false,
-            lastFrameIndex = existingMeta?.lastFrameIndex ?: 0,
-            isReadOnly = !canWrite,
-            parentFolder = file.parent ?: ""
-        )
+        runCatching { visit(DocumentsContract.getTreeDocumentId(root), 0) }
+        result
     }
 
-    /**
-     * Inspect SAF zip using ZipInputStream (Secondary read path for restricted SD cards)
-     */
-    private suspend fun inspectSafZip(
-        docUri: Uri,
-        name: String,
-        fileLength: Long,
-        lastModified: Long,
-        thumbnailPx: Int
-    ): ZipItem = withContext(Dispatchers.IO) {
-        val uriStr = docUri.toString()
-        val thumbFile = getCacheFileForPath(uriStr, lastModified, fileLength, thumbnailPx)
+    private fun inspectDirect(file: File, volumeId: String): ScanCacheEntry {
+        val path = file.canonicalOrAbsolute()
+        return try {
+            ZipFile(file).use { archive ->
+                val images = archive.entries().asSequence()
+                    .filter { !it.isDirectory && it.name.isImageEntry() }
+                    .map { it.name }
+                    .toList()
+                val (_, hasCover) = resolveCoverEntry(images)
+                ScanCacheEntry(path, volumeId, file.name, file.length(), file.lastModified(), images.size, hasCover, false, false, System.currentTimeMillis())
+            }
+        } catch (exception: Throwable) {
+            val encrypted = exception.message.orEmpty().contains("encrypt", true) || exception.message.orEmpty().contains("password", true)
+            ScanCacheEntry(path, volumeId, file.name, file.length(), file.lastModified(), 0, false, encrypted, !encrypted, System.currentTimeMillis())
+        }
+    }
 
-        var imageCount = 0
-        var hasCover = true
-        var coverEntryName: String? = null
-        var isCorrupt = false
-        var isZeroImages = false
-
-        if (!thumbFile.exists()) {
-            try {
-                context.contentResolver.openInputStream(docUri)?.use { stream ->
-                    ZipInputStream(BufferedInputStream(stream)).use { zis ->
-                        val entries = mutableListOf<String>()
-                        var entry = zis.nextEntry
-                        val entryBytesMap = mutableMapOf<String, ByteArray>()
-
+    private fun inspectSaf(uri: Uri, displayName: String, size: Long, lastModified: Long, volumeId: String): ScanCacheEntry {
+        return try {
+            val images = app.contentResolver.openInputStream(uri)?.use { stream ->
+                ZipInputStream(BufferedInputStream(stream)).use { zip ->
+                    buildList {
+                        var entry = zip.nextEntry
                         while (entry != null) {
-                            val entryName = entry.name
-                            if (!entry.isDirectory && isValidImageEntry(entryName)) {
-                                entries.add(entryName)
-                                // Keep bytes of candidates for 1.jpg resolution
-                                val base = getBasename(entryName)
-                                if (base.startsWith("1.", ignoreCase = true) || entries.size <= 2) {
-                                    val buffer = ByteArrayOutputStream()
-                                    zis.copyTo(buffer)
-                                    entryBytesMap[entryName] = buffer.toByteArray()
-                                }
-                            }
-                            zis.closeEntry()
-                            entry = zis.nextEntry
-                        }
-
-                        imageCount = entries.size
-                        isZeroImages = entries.isEmpty()
-
-                        if (entries.isNotEmpty()) {
-                            val (resolvedCover, coverFound) = resolveCoverEntry(entries)
-                            coverEntryName = resolvedCover
-                            hasCover = coverFound
-
-                            if (resolvedCover != null) {
-                                val bytes = entryBytesMap[resolvedCover]
-                                if (bytes != null) {
-                                    decodeAndSaveThumbnail(bytes.inputStream(), thumbFile, thumbnailPx)
-                                }
-                            }
+                            if (!entry.isDirectory && entry.name.isImageEntry()) add(entry.name)
+                            zip.closeEntry()
+                            entry = zip.nextEntry
                         }
                     }
                 }
-            } catch (e: Exception) {
-                isCorrupt = true
-            }
+            } ?: emptyList()
+            val (_, hasCover) = resolveCoverEntry(images)
+            ScanCacheEntry(uri.toString(), volumeId, displayName, size, lastModified, images.size, hasCover, false, false, System.currentTimeMillis())
+        } catch (exception: Throwable) {
+            ScanCacheEntry(uri.toString(), volumeId, displayName, size, lastModified, 0, false, false, true, System.currentTimeMillis())
         }
-
-        ZipItem(
-            path = uriStr,
-            name = name,
-            size = fileLength,
-            lastModified = lastModified,
-            volumeId = "sd",
-            volumeName = "SD card",
-            isMounted = true,
-            isSaf = true,
-            imageCount = imageCount,
-            hasCover = hasCover,
-            coverEntryName = coverEntryName,
-            thumbnailPath = if (thumbFile.exists()) thumbFile.absolutePath else null,
-            isCorrupt = isCorrupt,
-            isZeroImages = isZeroImages,
-            isReadOnly = false,
-            parentFolder = ""
-        )
     }
 
-    /**
-     * The 1.jpg Rule resolution:
-     * 1. Entry with basename exactly 1.jpg (case-insensitive), prefer root, then shallowest depth
-     * 2. 1.jpeg -> 3. 1.png -> 4. 1.webp -> 5. 1.gif -> 6. any image whose basename starts with 1.
-     * 7. Fallback: natural-sorted first image entry
-     */
+    /** Exact 1.jpg cover priority. `hasCover` is false only for natural-sort fallback. */
     fun resolveCoverEntry(imageEntries: List<String>): Pair<String?, Boolean> {
-        if (imageEntries.isEmpty()) return Pair(null, false)
-
-        // Rule 1: Basename exactly 1.jpg (case-insensitive), prefer shallowest depth
-        val exactJpgs = imageEntries.filter { getBasename(it).equals("1.jpg", ignoreCase = true) }
-        if (exactJpgs.isNotEmpty()) {
-            val shallowest = exactJpgs.minWithOrNull(compareBy({ getDepth(it) }, { NaturalOrderComparator.compare(it, it) }))
-            return Pair(shallowest, true)
-        }
-
-        // Rule 2: 1.jpeg
-        val exactJpegs = imageEntries.filter { getBasename(it).equals("1.jpeg", ignoreCase = true) }
-        if (exactJpegs.isNotEmpty()) {
-            return Pair(exactJpegs.minByOrNull { getDepth(it) }, true)
-        }
-
-        // Rule 3: 1.png
-        val exactPngs = imageEntries.filter { getBasename(it).equals("1.png", ignoreCase = true) }
-        if (exactPngs.isNotEmpty()) {
-            return Pair(exactPngs.minByOrNull { getDepth(it) }, true)
-        }
-
-        // Rule 4: 1.webp
-        val exactWebps = imageEntries.filter { getBasename(it).equals("1.webp", ignoreCase = true) }
-        if (exactWebps.isNotEmpty()) {
-            return Pair(exactWebps.minByOrNull { getDepth(it) }, true)
-        }
-
-        // Rule 5: 1.gif
-        val exactGifs = imageEntries.filter { getBasename(it).equals("1.gif", ignoreCase = true) }
-        if (exactGifs.isNotEmpty()) {
-            return Pair(exactGifs.minByOrNull { getDepth(it) }, true)
-        }
-
-        // Rule 6: Any image entry whose basename starts with 1.
-        val startsWith1 = imageEntries.filter { getBasename(it).startsWith("1.", ignoreCase = true) }
-        if (startsWith1.isNotEmpty()) {
-            val shallowest = startsWith1.minWithOrNull(compareBy({ getDepth(it) }, { NaturalOrderComparator.compare(it, it) }))
-            return Pair(shallowest, true)
-        }
-
-        // Rule 7: Fallback: natural-sorted first image entry (Missing 1.jpg -> hasCover = false)
-        val sortedFallback = imageEntries.sortedWith(NaturalOrderComparator)
-        return Pair(sortedFallback.firstOrNull(), false)
+        val candidates = imageEntries.filter { it.isImageEntry() }
+        fun pick(exactName: String) = candidates
+            .filter { it.substringAfterLast('/').equals(exactName, ignoreCase = true) }
+            .minWithOrNull(Comparator { first, second ->
+                val depth = first.count { it == '/' }.compareTo(second.count { it == '/' })
+                if (depth != 0) depth else NaturalOrderComparator.compare(first, second)
+            })
+        pick("1.jpg")?.let { return it to true }
+        pick("1.jpeg")?.let { return it to true }
+        pick("1.png")?.let { return it to true }
+        pick("1.webp")?.let { return it to true }
+        pick("1.gif")?.let { return it to true }
+        candidates.firstOrNull { candidate ->
+            val base = candidate.substringAfterLast('/')
+            base.startsWith("1.", ignoreCase = true) && base.substringAfterLast('.').lowercase() in IMAGE_EXT
+        }?.let { return it to true }
+        return candidates.minWithOrNull(NaturalOrderComparator) to false
     }
 
-    private fun isValidImageEntry(entryName: String): Boolean {
-        // Always skip: __MACOSX/, entries whose basename starts with '.', directory entries
-        if (entryName.startsWith("__MACOSX", ignoreCase = true) || entryName.contains("/__MACOSX", ignoreCase = true)) {
-            return false
+    /** Three-tier cache with one producer per key. Disk writes are atomic. */
+    suspend fun thumbnail(zip: ZipItem, px: Int): Bitmap? {
+        val key = thumbnailKey(zip.path, zip.lastModified, zip.size, px)
+        memoryCache.get(key)?.let { return it }
+        val disk = thumbnailFile(key)
+        if (disk.exists()) decodeDiskThumbnail(key, disk)?.let { return it }
+        val deferred = inFlightMutex.withLock {
+            inFlight[key] ?: repositoryScope.async(thumbnailDispatcher) {
+                generateThumbnail(zip, px, key, disk)
+            }.also { inFlight[key] = it }
         }
-        val basename = getBasename(entryName)
-        if (basename.startsWith(".")) {
-            return false
+        return try {
+            deferred.await()
+        } finally {
+            if (deferred.isCompleted) inFlightMutex.withLock { if (inFlight[key] === deferred) inFlight.remove(key) }
         }
-        val lower = basename.lowercase()
-        return lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png") ||
-               lower.endsWith(".webp") || lower.endsWith(".gif") || lower.endsWith(".bmp")
     }
 
-    private fun getBasename(path: String): String {
-        return path.substringAfterLast('/')
+    private fun decodeDiskThumbnail(key: String, file: File): Bitmap? = runCatching {
+        BitmapFactory.decodeFile(file.absolutePath)?.also { memoryCache.put(key, it) }
+    }.getOrNull()
+
+    private suspend fun generateThumbnail(zip: ZipItem, px: Int, key: String, disk: File): Bitmap? = withContext(thumbnailDispatcher) {
+        coroutineContext.ensureActive()
+        val bytes = openEntryBytes(zip, zip.coverEntryName ?: findCover(zip) ?: return@withContext null) ?: return@withContext null
+        coroutineContext.ensureActive()
+        val bitmap = decodeSampled(bytes, px) ?: return@withContext null
+        val tmp = File(disk.parentFile, "${disk.name}.tmp")
+        try {
+            FileOutputStream(tmp).use { bitmap.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+            coroutineContext.ensureActive()
+            if (!tmp.renameTo(disk)) {
+                disk.delete()
+                tmp.copyTo(disk, overwrite = true)
+                tmp.delete()
+            }
+            memoryCache.put(key, bitmap)
+            bitmap
+        } catch (cancelled: Throwable) {
+            tmp.delete()
+            throw cancelled
+        }
     }
 
-    private fun getDepth(path: String): Int {
-        return path.count { it == '/' }
+    private suspend fun findCover(zip: ZipItem): String? = withContext(Dispatchers.IO) {
+        val names = readEntryMetadata(zip).filter { it.isImage }.map { it.entryPath }
+        resolveCoverEntry(names).first
     }
 
-    private fun getCacheFileForPath(path: String, lastModified: Long, length: Long, thumbnailPx: Int): File {
-        val hash = (path + lastModified + length + thumbnailPx).hashCode()
-        return File(thumbDir, "thumb_${Math.abs(hash.toLong())}.jpg")
+    suspend fun listEntries(zip: ZipItem): List<ZipEntryInfo> = withContext(Dispatchers.IO) {
+        readEntryMetadata(zip).map { it.toInfo() }
     }
 
-    private fun decodeAndSaveThumbnail(input: InputStream, outputFile: File, targetPx: Int) {
-        val bytes = input.readBytes()
-        if (bytes.isEmpty()) return
+    suspend fun listImageEntries(zip: ZipItem): List<ZipEntryInfo> = withContext(Dispatchers.IO) {
+        readEntryMetadata(zip).filter { it.isImage }.sortedBy { naturalKey(it.entryPath) }.map { it.toInfo() }
+    }
 
-        // 1. inJustDecodeBounds
-        val boundsOptions = BitmapFactory.Options().apply {
-            inJustDecodeBounds = true
+    // Existing screens consume the richer row type; it is backed by the same natural ordering.
+    suspend fun getZipEntries(zip: ZipItem): List<ZipEntryItem> = withContext(Dispatchers.IO) {
+        readEntryMetadata(zip).sortedWith(compareBy<ZipEntryItem> { !it.isImage }.thenBy { naturalKey(it.entryPath) })
+    }
+
+    private fun readEntryMetadata(zip: ZipItem): List<ZipEntryItem> = try {
+        when {
+            zip.isSaf -> app.contentResolver.openInputStream(Uri.parse(zip.path))?.use { stream ->
+                ZipInputStream(BufferedInputStream(stream)).use { input ->
+                    buildList {
+                        var entry = input.nextEntry
+                        while (entry != null) {
+                            if (!entry.isDirectory && !entry.name.startsWith("__MACOSX/")) add(entry.toItem())
+                            input.closeEntry(); entry = input.nextEntry
+                        }
+                    }
+                }
+            } ?: emptyList()
+            else -> ZipFile(File(zip.path)).use { archive -> archive.entries().asSequence().filter { !it.isDirectory && !it.name.startsWith("__MACOSX/") }.map { it.toItem() }.toList() }
         }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, boundsOptions)
+    } catch (_: Throwable) { emptyList() }
 
-        val origWidth = boundsOptions.outWidth
-        val origHeight = boundsOptions.outHeight
-        if (origWidth <= 0 || origHeight <= 0) return
+    suspend fun readEntry(zip: ZipItem, entryName: String, targetPx: Int): Bitmap? =
+        openEntryBytes(zip, entryName)?.let { decodeSampled(it, targetPx) }
 
-        // 2. Compute inSampleSize
-        var inSampleSize = 1
-        val maxDim = Math.max(origWidth, origHeight)
-        while ((maxDim / (inSampleSize * 2)) >= targetPx) {
-            inSampleSize *= 2
+    /** Holds one ZipFile for a direct-file slideshow; SAF archives retain their streaming backend. */
+    suspend fun beginPlayback(zip: ZipItem) = withContext(Dispatchers.IO) {
+        if (zip.isSaf) return@withContext
+        playbackMutex.withLock {
+            if (playbackArchives[zip.path] == null) playbackArchives[zip.path] = ZipFile(File(zip.path))
         }
+    }
 
-        // 3. Decode at downsampled size
-        val decodeOptions = BitmapFactory.Options().apply {
-            this.inSampleSize = inSampleSize
-            inPreferredConfig = Bitmap.Config.RGB_565
-        }
-        val decodedBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions) ?: return
+    suspend fun endPlayback(path: String) = withContext(Dispatchers.IO) {
+        playbackMutex.withLock { playbackArchives.remove(path)?.close() }
+    }
 
-        // 4. Save to cache
+    suspend fun loadFrameBitmap(zipPath: String, entryName: String, maxDim: Int = 1600): Bitmap? {
+        val zip = findZip(zipPath) ?: ephemeralZip(zipPath)
+        return readEntry(zip, entryName, maxDim)
+    }
+
+    private suspend fun openEntryBytes(zip: ZipItem, entryName: String): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            if (zip.isSaf) {
+                app.contentResolver.openInputStream(Uri.parse(zip.path))?.use { stream ->
+                    ZipInputStream(BufferedInputStream(stream)).use { input ->
+                        var entry = input.nextEntry
+                        while (entry != null) {
+                            if (entry.name == entryName) return@withContext input.readBytes()
+                            input.closeEntry(); entry = input.nextEntry
+                        }
+                    }
+                }
+                null
+            } else {
+                val playbackArchive = playbackMutex.withLock { playbackArchives[zip.path] }
+                if (playbackArchive != null) {
+                    playbackArchive.getEntry(entryName)?.let { entry ->
+                        playbackArchive.getInputStream(entry).use(InputStream::readBytes)
+                    }
+                } else {
+                    ZipFile(File(zip.path)).use { archive ->
+                        archive.getEntry(entryName)?.let { entry -> archive.getInputStream(entry).use(InputStream::readBytes) }
+                    }
+                }
+            }
+        } catch (_: Throwable) { null }
+    }
+
+    suspend fun rename(zip: ZipItem, newName: String): Result<File> = withContext(Dispatchers.IO) {
         runCatching {
-            FileOutputStream(outputFile).use { out ->
-                decodedBitmap.compress(Bitmap.CompressFormat.JPEG, 85, out)
+            val normalized = newName.trim().let { if (it.endsWith(".zip", true)) it else "$it.zip" }
+            require(normalized.isNotBlank() && !normalized.contains('/') && !normalized.contains('\\'))
+            if (zip.isSaf) {
+                val renamed = DocumentsContract.renameDocument(app.contentResolver, Uri.parse(zip.path), normalized)
+                    ?: throw ZipSlideError.ReadOnly(zip.path)
+                scanCacheDao.delete(zip.path); zipMetaDao.delete(zip.path); invalidatePath(zip.path); triggerRescan()
+                return@withContext Result.success(File(renamed.path ?: normalized))
             }
+            val source = File(zip.path)
+            if (!source.exists()) throw ZipSlideError.FileNotFound(zip.path)
+            if (!source.canWrite() || source.parentFile?.canWrite() == false) throw ZipSlideError.ReadOnly(zip.path)
+            val target = File(source.parentFile, normalized)
+            if (target.exists()) throw IOException("A file with this name already exists.")
+            if (!source.renameTo(target)) throw IOException("Could not rename archive.")
+            scanCacheDao.delete(zip.path); zipMetaDao.delete(zip.path); invalidatePath(zip.path); triggerRescan()
+            target
         }
     }
 
-    private fun sweepThumbnailCache(activeZipPaths: Set<String>) {
-        val files = thumbDir.listFiles() ?: return
-        val activeZipFiles = activeZipPaths.map { File(it) }.filter { it.exists() }
-        val activeHashes = activeZipFiles.map { file ->
-            "thumb_${Math.abs((file.canonicalPath + file.lastModified() + file.length() + 512).hashCode().toLong())}.jpg"
-        }.toSet()
+    suspend fun renameZip(zip: ZipItem, newName: String): Result<ZipItem> = rename(zip, newName).map { file ->
+        zip.copy(path = file.canonicalOrAbsolute(), name = file.name, thumbnailPath = null)
+    }
 
-        for (file in files) {
-            // Keep if recently touched or matches active hash
-            if (!activeHashes.contains(file.name) && System.currentTimeMillis() - file.lastModified() > 86400000L) {
-                file.delete()
+    suspend fun delete(zip: ZipItem): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val deleted = if (zip.isSaf) DocumentsContract.deleteDocument(app.contentResolver, Uri.parse(zip.path)) else {
+                val file = File(zip.path)
+                if (!file.exists()) true else file.delete()
             }
+            if (!deleted) throw ZipSlideError.ReadOnly(zip.path)
+            scanCacheDao.delete(zip.path); zipMetaDao.delete(zip.path); invalidatePath(zip.path)
         }
     }
 
-    suspend fun clearThumbnailCache() = withContext(Dispatchers.IO) {
-        thumbDir.listFiles()?.forEach { it.delete() }
-        triggerRescan()
+    suspend fun deleteZip(zip: ZipItem): Result<Unit> = delete(zip)
+
+    suspend fun copyTo(zip: ZipItem, destDirUri: Uri): Result<Uri> = withContext(Dispatchers.IO) {
+        runCatching {
+            val rootId = DocumentsContract.getTreeDocumentId(destDirUri)
+            val destinationRoot = DocumentsContract.buildDocumentUriUsingTree(destDirUri, rootId)
+            val created = DocumentsContract.createDocument(app.contentResolver, destinationRoot, "application/zip", zip.name)
+                ?: throw ZipSlideError.ReadOnly(destDirUri.toString())
+            app.contentResolver.openOutputStream(created)?.use { output ->
+                openArchiveStream(zip)?.use { input -> input.copyTo(output) } ?: throw ZipSlideError.FileNotFound(zip.path)
+            } ?: throw ZipSlideError.ReadOnly(created.toString())
+            created
+        }
     }
+
+    suspend fun moveTo(zip: ZipItem, destDirUri: Uri): Result<Uri> = copyTo(zip, destDirUri).onSuccess { delete(zip) }
+
+    fun extractAll(zip: ZipItem, destDirUri: Uri): Flow<ExtractProgress> = flow {
+        val images = listImageEntries(zip)
+        val total = images.size
+        if (total == 0) return@flow
+        val rootId = DocumentsContract.getTreeDocumentId(destDirUri)
+        val destinationRoot = DocumentsContract.buildDocumentUriUsingTree(destDirUri, rootId)
+        images.forEachIndexed { index, entry ->
+            val target = DocumentsContract.createDocument(app.contentResolver, destinationRoot, mimeFor(entry.name), entry.name.substringAfterLast('/'))
+                ?: throw ZipSlideError.ReadOnly(destDirUri.toString())
+            app.contentResolver.openOutputStream(target)?.use { output ->
+                openEntryBytes(zip, entry.name)?.inputStream()?.use { it.copyTo(output) } ?: throw ZipSlideError.CorruptZip(zip.path, IOException("Missing entry"))
+            } ?: throw ZipSlideError.ReadOnly(target.toString())
+            emit(ExtractProgress(index + 1, total, entry.name.substringAfterLast('/')))
+        }
+    }.flowOn(Dispatchers.IO)
+
+    /** Legacy direct-folder adapter used by the existing action sheet. */
+    suspend fun extractImages(zip: ZipItem, destDir: File? = null, onProgress: (Int, Int, String) -> Unit): Result<File> = withContext(Dispatchers.IO) {
+        runCatching {
+            val target = destDir ?: File(File(zip.path).parentFile ?: app.filesDir, "${zip.name.substringBeforeLast('.')}_extracted")
+            if (!target.exists() && !target.mkdirs()) throw ZipSlideError.ReadOnly(target.path)
+            if (!target.canWrite()) throw ZipSlideError.ReadOnly(target.path)
+            val images = listImageEntries(zip)
+            images.forEachIndexed { index, entry ->
+                val out = File(target, entry.name.substringAfterLast('/'))
+                openEntryBytes(zip, entry.name)?.inputStream()?.use { input -> FileOutputStream(out).use(input::copyTo) }
+                    ?: throw ZipSlideError.CorruptZip(zip.path, IOException("Missing entry"))
+                onProgress(index + 1, images.size, out.name)
+            }
+            target
+        }
+    }
+
+    fun shareUri(zip: ZipItem): Uri = if (zip.isSaf) Uri.parse(zip.path) else FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", File(zip.path))
+
+    suspend fun clearCache() = withContext(Dispatchers.IO) {
+        memoryCache.evictAll(); thumbsDir.listFiles()?.forEach(File::delete)
+    }
+
+    suspend fun clearThumbnailCache() { clearCache(); rescanNow() }
+    suspend fun cacheSizeBytes(): Long = withContext(Dispatchers.IO) { thumbsDir.listFiles()?.sumOf(File::length) ?: 0L }
+    suspend fun regenerateAll() { clearCache(); rescanNow() }
 
     suspend fun toggleFavorite(path: String) = withContext(Dispatchers.IO) {
-        val current = _rawZips.value.find { it.path == path } ?: return@withContext
-        val newFav = !current.isFavorite
-        zipMetaDao.updateFavorite(path, newFav)
-        _rawZips.value = _rawZips.value.map {
-            if (it.path == path) it.copy(isFavorite = newFav) else it
-        }
+        val current = zipMetaDao.get(path) ?: ZipMetaEntity(path = path)
+        zipMetaDao.upsert(current.copy(favorite = !current.favorite, updatedAt = System.currentTimeMillis()))
     }
 
     suspend fun updateLastFrame(path: String, frameIndex: Int) = withContext(Dispatchers.IO) {
-        zipMetaDao.updateLastFrame(path, frameIndex)
-        _rawZips.value = _rawZips.value.map {
-            if (it.path == path) it.copy(lastFrameIndex = frameIndex) else it
-        }
+        val current = zipMetaDao.get(path) ?: ZipMetaEntity(path = path)
+        zipMetaDao.upsert(current.copy(lastFrameIndex = frameIndex, updatedAt = System.currentTimeMillis()))
     }
 
-    suspend fun renameZip(zip: ZipItem, newName: String): Result<ZipItem> = withContext(Dispatchers.IO) {
-        if (zip.isSaf) {
-            return@withContext Result.failure(IOException("SAF rename not supported on this volume"))
-        }
-        val file = File(zip.path)
-        if (!file.exists()) return@withContext Result.failure(IOException("File not found"))
-        if (!file.canWrite() || file.parentFile?.canWrite() == false) {
-            return@withContext Result.failure(IOException("This folder is read-only"))
-        }
-
-        val formattedName = if (newName.endsWith(".zip", ignoreCase = true)) newName else "$newName.zip"
-        val targetFile = File(file.parentFile, formattedName)
-        if (targetFile.exists()) {
-            return@withContext Result.failure(IOException("A file named '$formattedName' already exists"))
-        }
-
-        val success = file.renameTo(targetFile)
-        if (!success) {
-            return@withContext Result.failure(IOException("Failed to rename file"))
-        }
-
-        // Delete old metadata and invalidate old thumbnail
-        zipMetaDao.deleteByPath(zip.path)
-        val oldThumb = zip.thumbnailPath?.let { File(it) }
-        oldThumb?.delete()
-
-        triggerRescan()
-        Result.success(zip.copy(path = targetFile.canonicalPath, name = targetFile.name))
+    suspend fun finishWatching(path: String, frameIndex: Int) = withContext(Dispatchers.IO) {
+        val current = zipMetaDao.get(path) ?: ZipMetaEntity(path = path)
+        zipMetaDao.upsert(current.copy(lastFrameIndex = frameIndex, watchCount = current.watchCount + 1, updatedAt = System.currentTimeMillis()))
     }
 
-    suspend fun deleteZip(zip: ZipItem): Result<Unit> = withContext(Dispatchers.IO) {
-        if (zip.isSaf) {
-            try {
-                val deleted = DocumentsContract.deleteDocument(context.contentResolver, Uri.parse(zip.path))
-                if (deleted) {
-                    zipMetaDao.deleteByPath(zip.path)
-                    zip.thumbnailPath?.let { File(it).delete() }
-                    _rawZips.value = _rawZips.value.filter { it.path != zip.path }
-                    return@withContext Result.success(Unit)
-                }
-            } catch (e: Exception) {
-                return@withContext Result.failure(e)
+    fun updateMountStates() { volumeRepository.refreshVolumes() }
+
+    suspend fun findZipItem(path: String): ZipItem? = zipsFlow.first().firstOrNull { it.path == path }
+    private suspend fun findZip(path: String): ZipItem? = findZipItem(path)
+    private fun ephemeralZip(path: String): ZipItem {
+        val file = File(path)
+        return ZipItem(path, file.name.ifBlank { path.substringAfterLast('/') }, file.length(), file.lastModified(), "primary", "Internal storage", isSaf = path.startsWith("content://"))
+    }
+
+    private fun ScanCacheEntry.toZipItem(meta: ZipMetaEntity?, volumes: List<Volume>): ZipItem {
+        val volume = volumes.firstOrNull { it.id == volumeId }
+        val isSaf = path.startsWith("content://")
+        val source = if (isSaf) null else File(path)
+        val key = thumbnailKey(path, lastModified, sizeBytes, 512)
+        return ZipItem(
+            path = path,
+            name = fileName,
+            size = sizeBytes,
+            lastModified = lastModified,
+            volumeId = volumeId,
+            volumeName = volume?.label ?: if (volumeId.startsWith("sdcard:")) "SD card" else if (volumeId.startsWith("usb:")) "USB" else "Internal storage",
+            isMounted = if (isSaf) true else volume?.isMounted ?: false,
+            isSaf = isSaf,
+            imageCount = imageCount,
+            hasCover = hasCover,
+            thumbnailPath = thumbnailFile(key).takeIf(File::exists)?.absolutePath,
+            isEncrypted = isEncrypted,
+            isCorrupt = isCorrupt,
+            isZeroImages = imageCount == 0,
+            isFavorite = meta?.favorite ?: false,
+            lastFrameIndex = meta?.lastFrameIndex ?: 0,
+            isReadOnly = !isSaf && (source?.canWrite() == false || source?.parentFile?.canWrite() == false),
+            parentFolder = source?.parent.orEmpty(),
+            watchCount = meta?.watchCount ?: 0
+        )
+    }
+
+    private fun List<ZipItem>.sort(sortBy: SortBy, ascending: Boolean, natural: Boolean, stableSeed: Long): List<ZipItem> {
+        if (sortBy == SortBy.RANDOM) return sortedBy { (it.path.hashCode().toLong() xor stableSeed) }
+        val comparator = compareBy<ZipItem> {
+            when (sortBy) {
+                SortBy.NAME -> if (natural) naturalKey(it.name) else it.name.lowercase()
+                SortBy.DATE_MODIFIED, SortBy.DATE_CREATED -> it.lastModified.toString().padStart(20, '0')
+                SortBy.SIZE -> it.size.toString().padStart(20, '0')
+                SortBy.IMAGE_COUNT -> it.imageCount.toString().padStart(10, '0')
+                SortBy.RANDOM -> it.path
             }
-            return@withContext Result.failure(IOException("Could not delete via SAF"))
         }
-
-        val file = File(zip.path)
-        if (!file.exists()) {
-            zipMetaDao.deleteByPath(zip.path)
-            _rawZips.value = _rawZips.value.filter { it.path != zip.path }
-            return@withContext Result.success(Unit)
-        }
-
-        if (!file.canWrite() || file.parentFile?.canWrite() == false) {
-            return@withContext Result.failure(IOException("This folder is read-only"))
-        }
-
-        val deleted = file.delete()
-        if (deleted) {
-            zipMetaDao.deleteByPath(zip.path)
-            zip.thumbnailPath?.let { File(it).delete() }
-            _rawZips.value = _rawZips.value.filter { it.path != zip.path }
-            return@withContext Result.success(Unit)
-        } else {
-            return@withContext Result.failure(IOException("Failed to delete file"))
-        }
+        return if (ascending) sortedWith(comparator) else sortedWith(comparator.reversed())
     }
 
-    /**
-     * Get sorted entries of a zip (natural sort, 2.jpg before 10.jpg)
-     */
-    suspend fun getZipEntries(zip: ZipItem): List<ZipEntryItem> = withContext(Dispatchers.IO) {
-        val result = mutableListOf<ZipEntryItem>()
-        try {
-            if (zip.isSaf) {
-                context.contentResolver.openInputStream(Uri.parse(zip.path))?.use { stream ->
-                    ZipInputStream(BufferedInputStream(stream)).use { zis ->
-                        var entry = zis.nextEntry
-                        while (entry != null) {
-                            val name = entry.name
-                            if (!entry.isDirectory && !name.startsWith("__MACOSX")) {
-                                val isImg = isValidImageEntry(name)
-                                val base = getBasename(name)
-                                val folder = name.substringBeforeLast('/', "")
-                                result.add(
-                                    ZipEntryItem(
-                                        entryPath = name,
-                                        basename = base,
-                                        isImage = isImg,
-                                        size = entry.size.coerceAtLeast(0L),
-                                        compressedSize = entry.compressedSize.coerceAtLeast(0L),
-                                        folderPath = folder
-                                    )
-                                )
-                            }
-                            zis.closeEntry()
-                            entry = zis.nextEntry
-                        }
-                    }
-                }
-            } else {
-                val file = File(zip.path)
-                if (file.exists()) {
-                    ZipFile(file).use { zipFile ->
-                        val enumeration = zipFile.entries()
-                        while (enumeration.hasMoreElements()) {
-                            val entry = enumeration.nextElement()
-                            val name = entry.name
-                            if (!entry.isDirectory && !name.startsWith("__MACOSX")) {
-                                val isImg = isValidImageEntry(name)
-                                val base = getBasename(name)
-                                val folder = name.substringBeforeLast('/', "")
-                                result.add(
-                                    ZipEntryItem(
-                                        entryPath = name,
-                                        basename = base,
-                                        isImage = isImg,
-                                        size = entry.size.coerceAtLeast(0L),
-                                        compressedSize = entry.compressedSize.coerceAtLeast(0L),
-                                        folderPath = folder
-                                    )
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        // Natural sort all entries
-        result.sortedWith(compareBy({ !it.isImage }, { NaturalOrderComparator.compare(it.entryPath, it.entryPath) }))
+    private fun Volume.matchesFilter(filter: VolumeFilter) = when (filter) {
+        VolumeFilter.ALL -> true
+        VolumeFilter.INTERNAL -> id == "primary"
+        VolumeFilter.SD -> id.startsWith("sdcard:")
+        VolumeFilter.USB -> id.startsWith("usb:")
     }
 
-    /**
-     * Load a single frame bitmap for slideshow or viewer (downsampled to ~1600px, never full raw)
-     */
-    suspend fun loadFrameBitmap(zipPath: String, entryName: String, maxDim: Int = 1600): Bitmap? = withContext(Dispatchers.IO) {
-        try {
-            if (zipPath.startsWith("content://")) {
-                context.contentResolver.openInputStream(Uri.parse(zipPath))?.use { stream ->
-                    ZipInputStream(BufferedInputStream(stream)).use { zis ->
-                        var entry = zis.nextEntry
-                        while (entry != null) {
-                            if (entry.name == entryName) {
-                                val bytes = zis.readBytes()
-                                return@withContext decodeSampledBitmap(bytes, maxDim)
-                            }
-                            zis.closeEntry()
-                            entry = zis.nextEntry
-                        }
-                    }
-                }
-            } else {
-                val file = File(zipPath)
-                if (file.exists()) {
-                    ZipFile(file).use { zipFile ->
-                        val entry = zipFile.getEntry(entryName) ?: return@withContext null
-                        zipFile.getInputStream(entry).use { input ->
-                            val bytes = input.readBytes()
-                            return@withContext decodeSampledBitmap(bytes, maxDim)
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        null
+    private fun ZipItem.matchesFilter(filter: VolumeFilter) = when (filter) {
+        VolumeFilter.ALL -> true
+        VolumeFilter.INTERNAL -> volumeId == "primary"
+        VolumeFilter.SD -> volumeId.startsWith("sdcard:")
+        VolumeFilter.USB -> volumeId.startsWith("usb:")
     }
 
-    private fun decodeSampledBitmap(bytes: ByteArray, maxTargetDim: Int): Bitmap? {
-        if (bytes.isEmpty()) return null
+    private fun openArchiveStream(zip: ZipItem): InputStream? = if (zip.isSaf) app.contentResolver.openInputStream(Uri.parse(zip.path)) else FileInputStream(File(zip.path))
+    private fun invalidatePath(path: String) { thumbsDir.listFiles()?.filter { it.name.contains(path.hashCode().toString()) }?.forEach(File::delete); memoryCache.evictAll() }
+    private fun sweepThumbnailCache(live: Set<String>) { if (live.isEmpty()) return; thumbsDir.listFiles()?.filter { it.isFile && System.currentTimeMillis() - it.lastModified() > 7 * 24 * 60 * 60 * 1000L }?.forEach(File::delete) }
+    private fun thumbnailKey(path: String, modified: Long, size: Long, px: Int) = (path + modified + size + px).hashCode().toUInt().toString(16)
+    private fun thumbnailFile(key: String) = File(thumbsDir, "$key.jpg")
+    private fun safVolumeId(uri: String) = "saf:${uri.hashCode().toUInt().toString(16)}"
+    private fun String.isImageEntry(): Boolean = !startsWith("__MACOSX/") && !substringAfterLast('/').startsWith('.') && substringAfterLast('.').lowercase() in IMAGE_EXT
+    private fun ZipEntry.toItem() = ZipEntryItem(name, name.substringAfterLast('/'), name.isImageEntry(), size.coerceAtLeast(0), compressedSize.coerceAtLeast(0), folderPath = name.substringBeforeLast('/', ""))
+    private fun File.canonicalOrAbsolute() = runCatching { canonicalPath }.getOrDefault(absolutePath)
+    private fun decodeSampled(bytes: ByteArray, targetPx: Int): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-
-        val w = bounds.outWidth
-        val h = bounds.outHeight
-        if (w <= 0 || h <= 0) return null
-
-        var sampleSize = 1
-        val maxOriginal = Math.max(w, h)
-        while ((maxOriginal / (sampleSize * 2)) >= maxTargetDim) {
-            sampleSize *= 2
-        }
-
-        val decodeOptions = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.RGB_565
-        }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, decodeOptions)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / sample > targetPx || bounds.outHeight / sample > targetPx) sample *= 2
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.RGB_565 })
     }
-
-    /**
-     * Extract images from zip to target directory
-     * Defaults to the same volume as the source zip!
-     */
-    suspend fun extractImages(
-        zip: ZipItem,
-        destDir: File? = null,
-        onProgress: (current: Int, total: Int, name: String) -> Unit
-    ): Result<File> = withContext(Dispatchers.IO) {
-        val targetDir = destDir ?: run {
-            val srcFile = File(zip.path)
-            val parent = srcFile.parentFile ?: context.getExternalFilesDir("Extracted") ?: context.filesDir
-            val folderName = zip.name.substringBeforeLast('.') + "_extracted"
-            File(parent, folderName).apply { mkdirs() }
-        }
-
-        if (!targetDir.canWrite()) {
-            return@withContext Result.failure(IOException("This folder is read-only"))
-        }
-
-        try {
-            val entries = getZipEntries(zip).filter { it.isImage }
-            val total = entries.size
-            if (total == 0) {
-                return@withContext Result.failure(IOException("No images found in zip"))
-            }
-
-            if (zip.isSaf) {
-                context.contentResolver.openInputStream(Uri.parse(zip.path))?.use { stream ->
-                    ZipInputStream(BufferedInputStream(stream)).use { zis ->
-                        var entry = zis.nextEntry
-                        var extractedCount = 0
-                        while (entry != null) {
-                            val name = entry.name
-                            if (!entry.isDirectory && isValidImageEntry(name)) {
-                                val base = getBasename(name)
-                                val outFile = File(targetDir, base)
-                                FileOutputStream(outFile).use { fos ->
-                                    zis.copyTo(fos)
-                                }
-                                extractedCount++
-                                onProgress(extractedCount, total, base)
-                            }
-                            zis.closeEntry()
-                            entry = zis.nextEntry
-                        }
-                    }
-                }
-            } else {
-                ZipFile(File(zip.path)).use { zipFile ->
-                    for ((index, item) in entries.withIndex()) {
-                        val entry = zipFile.getEntry(item.entryPath) ?: continue
-                        val outFile = File(targetDir, item.basename)
-                        zipFile.getInputStream(entry).use { input ->
-                            FileOutputStream(outFile).use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-                        onProgress(index + 1, total, item.basename)
-                    }
-                }
-            }
-            Result.success(targetDir)
-        } catch (e: Exception) {
-            Result.failure(e)
-        }
-    }
-
-    private fun sortZips(
-        list: List<ZipItem>,
-        sortBy: SortBy,
-        ascending: Boolean,
-        naturalSort: Boolean
-    ): List<ZipItem> {
-        val comparator = Comparator<ZipItem> { a, b ->
-            val result = when (sortBy) {
-                SortBy.NAME -> {
-                    if (naturalSort) NaturalOrderComparator.compare(a.name, b.name)
-                    else a.name.compareTo(b.name, ignoreCase = true)
-                }
-                SortBy.MODIFIED -> a.lastModified.compareTo(b.lastModified)
-                SortBy.CREATED -> a.lastModified.compareTo(b.lastModified)
-                SortBy.SIZE -> a.size.compareTo(b.size)
-                SortBy.IMAGE_COUNT -> a.imageCount.compareTo(b.imageCount)
-                SortBy.RANDOM -> 0
-            }
-            if (ascending) result else -result
-        }
-
-        return if (sortBy == SortBy.RANDOM) list.shuffled() else list.sortedWith(comparator)
-    }
-
-    /**
-     * Seeds initial sample slideshow zips so the user immediately experiences
-     * 1.jpg cover resolution and fullscreen playback without hunting for files.
-     */
-    private suspend fun ensureSampleZipsExist() = withContext(Dispatchers.IO) {
-        val targetDir = context.getExternalFilesDir("Slideshows") ?: File(context.filesDir, "Slideshows")
-        targetDir.mkdirs()
-
-        val sample1 = File(targetDir, "Nature_Expedition.zip")
-        val sample2 = File(targetDir, "Architecture_Walk.zip")
-        val sample3 = File(targetDir, "Vintage_Portraits.zip")
-
-        if (!sample1.exists()) {
-            createDemoZip(sample1, "Nature", hasOneJpg = true, count = 12)
-        }
-        if (!sample2.exists()) {
-            createDemoZip(sample2, "Architecture", hasOneJpg = true, count = 15)
-        }
-        if (!sample3.exists()) {
-            // Demo zip missing 1.jpg to showcase warning dot & fallback
-            createDemoZip(sample3, "Vintage", hasOneJpg = false, count = 8)
-        }
-    }
-
-    private fun createDemoZip(zipFile: File, title: String, hasOneJpg: Boolean, count: Int) {
-        runCatching {
-            FileOutputStream(zipFile).use { fos ->
-                java.util.zip.ZipOutputStream(fos).use { zos ->
-                    val startIndex = if (hasOneJpg) 1 else 2
-                    for (i in startIndex..(startIndex + count - 1)) {
-                        val entryName = if (i == 10 && hasOneJpg) "10.jpg" else "$i.jpg"
-                        zos.putNextEntry(ZipEntry(entryName))
-
-                        // Generate clean crisp demo image bitmap
-                        val bmp = Bitmap.createBitmap(800, 600, Bitmap.Config.RGB_565)
-                        val canvas = Canvas(bmp)
-                        val paint = Paint().apply { isAntiAlias = true }
-
-                        // Background gradient-like color
-                        val hue = (i * 35f + title.hashCode()) % 360f
-                        val color = AndroidColor.HSVToColor(floatArrayOf(hue, 0.65f, 0.25f))
-                        canvas.drawColor(color)
-
-                        // Title and frame text
-                        paint.color = AndroidColor.parseColor("#E8B458")
-                        paint.textSize = 48f
-                        paint.textAlign = Paint.Align.CENTER
-                        canvas.drawText("$title Slideshow", 400f, 260f, paint)
-
-                        paint.color = AndroidColor.WHITE
-                        paint.textSize = 36f
-                        val frameLabel = if (i == 1 && hasOneJpg) "1.jpg (First Frame / Cover)" else "Frame #$i"
-                        canvas.drawText(frameLabel, 400f, 340f, paint)
-
-                        paint.color = AndroidColor.parseColor("#A0A0AB")
-                        paint.textSize = 24f
-                        canvas.drawText("Natural Sort Verification Test", 400f, 400f, paint)
-
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 85, zos)
-                        zos.closeEntry()
-                        bmp.recycle()
-                    }
-                }
-            }
-        }
+    private fun mimeFor(name: String) = when (name.substringAfterLast('.').lowercase()) {
+        "png" -> "image/png"; "webp" -> "image/webp"; "gif" -> "image/gif"; else -> "image/jpeg"
     }
 }
