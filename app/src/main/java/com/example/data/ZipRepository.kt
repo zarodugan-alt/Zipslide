@@ -88,6 +88,10 @@ fun ZipSlideError.toUserMessage(): String = when (this) {
     is ZipSlideError.SafAccessLost -> "Access to the selected folder was lost. Choose it again in Settings."
 }
 
+/** The only UI-facing error translation. Never expose filesystem or parser exception text. */
+fun Throwable.toUserMessage(): String = (this as? ZipSlideError)?.toUserMessage()
+    ?: "That operation could not be completed. Try again."
+
 /**
  * Disk and archive access layer. All blocking work is explicitly dispatched to IO; Room flows are
  * the source of truth so the browser can render cached rows before a revalidation completes.

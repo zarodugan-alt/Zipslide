@@ -59,6 +59,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.ZipRepository
+import com.example.data.toUserMessage
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.design.ZipSlideTheme
@@ -74,14 +75,20 @@ fun ZipContentsScreen(
     zipPath: String,
     zipRepository: ZipRepository,
     onNavigateToSlideshow: (zipPath: String, frameIndex: Int) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    state: ZipContentsState? = null,
+    onEvent: (ZipContentsEvent) -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
-    var entries by remember { mutableStateOf<List<ZipEntryItem>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    var zipItem by remember { mutableStateOf<ZipItem?>(null) }
+    // Local fallback preserves the reusable screen preview; app navigation supplies immutable state.
+    var localEntries by remember { mutableStateOf<List<ZipEntryItem>>(emptyList()) }
+    var localLoading by remember { mutableStateOf(true) }
+    var localZipItem by remember { mutableStateOf<ZipItem?>(null) }
+    val entries = state?.entries ?: localEntries
+    val isLoading = state?.loading ?: localLoading
+    val zipItem = state?.zip ?: localZipItem
     var expandOtherFiles by remember { mutableStateOf(false) }
 
     // Progress sheet for extraction
@@ -93,23 +100,27 @@ fun ZipContentsScreen(
     // Thumbnails memory cache for content items
     val thumbs = remember { mutableStateMapOf<String, androidx.compose.ui.graphics.ImageBitmap>() }
 
-    LaunchedEffect(zipPath) {
-        // Prefer the Room-backed item so SAF state, counts, and volume metadata are retained.
-        val item = zipRepository.findZipItem(zipPath) ?: run {
-            val file = File(zipPath)
-            ZipItem(
-                path = zipPath,
-                name = file.name.ifBlank { zipPath.substringAfterLast('/') },
-                size = file.length(),
-                lastModified = file.lastModified(),
-                volumeId = "primary",
-                volumeName = "Internal storage",
-                isSaf = zipPath.startsWith("content://")
-            )
+    LaunchedEffect(zipPath, state != null) {
+        if (state != null) {
+            onEvent(ZipContentsEvent.Load(zipPath))
+        } else {
+            // Preview/reuse fallback; repository methods do their disk work on Dispatchers.IO.
+            val item = zipRepository.findZipItem(zipPath) ?: run {
+                val file = File(zipPath)
+                ZipItem(
+                    path = zipPath, name = file.name.ifBlank { zipPath.substringAfterLast('/') },
+                    size = file.length(), lastModified = file.lastModified(),
+                    volumeId = "primary", volumeName = "Internal storage", isSaf = zipPath.startsWith("content://")
+                )
+            }
+            localZipItem = item
+            localEntries = zipRepository.getZipEntries(item)
+            localLoading = false
         }
-        zipItem = item
-        entries = zipRepository.getZipEntries(item)
-        isLoading = false
+    }
+
+    LaunchedEffect(state?.error) {
+        state?.error?.let { snackbarHostState.showSnackbar(it) }
     }
 
     val imageEntries = remember(entries) { entries.filter { it.isImage } }
@@ -223,7 +234,7 @@ fun ZipContentsScreen(
                                             if (result.isSuccess) {
                                                 snackbarHostState.showSnackbar("Extracted to ${result.getOrNull()?.name}")
                                             } else {
-                                                snackbarHostState.showSnackbar("Extraction failed: ${result.exceptionOrNull()?.message}")
+                                                snackbarHostState.showSnackbar(result.exceptionOrNull()?.toUserMessage() ?: "That operation could not be completed. Try again.")
                                             }
                                         }
                                     },

@@ -18,7 +18,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
@@ -39,11 +38,18 @@ import com.example.design.ZipSlideTheme
 import com.example.ui.browser.BrowserScreen
 import com.example.ui.browser.BrowserViewModel
 import com.example.ui.contents.ZipContentsScreen
+import com.example.ui.contents.ZipContentsViewModel
 import com.example.ui.onboarding.OnboardingScreen
+import com.example.ui.onboarding.OnboardingEvent
+import com.example.ui.onboarding.OnboardingViewModel
 import com.example.ui.settings.SettingsScreen
+import com.example.ui.settings.SettingsViewModel
 import com.example.ui.slideshow.SlideshowScreen
+import com.example.ui.slideshow.SlideshowViewModel
 import com.example.ui.storage.StorageOverviewScreen
+import com.example.ui.storage.StorageOverviewViewModel
 import com.example.ui.storage.VolumeDiagnosticsScreen
+import com.example.ui.storage.VolumeDiagnosticsViewModel
 import kotlinx.coroutines.launch
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -78,7 +84,6 @@ class MainActivity : ComponentActivity() {
             val zips = browserState.items
             val isScanning = browserState.scanProgress is com.example.data.ScanProgress.Scanning
 
-            val scope = rememberCoroutineScope()
             val navController = rememberNavController()
 
             var permissionGranted by remember { mutableStateOf(hasPermission()) }
@@ -104,24 +109,18 @@ class MainActivity : ComponentActivity() {
                         startDestination = startDestination
                     ) {
                         composable("onboarding") {
+                            val onboardingViewModel: OnboardingViewModel = viewModel()
                             OnboardingScreen(
                                 onPermissionGranted = {
                                     permissionGranted = true
-                                    scope.launch {
-                                        settingsRepo.setOnboardingCompleted(true)
-                                        zipRepo.triggerRescan()
-                                    }
+                                    onboardingViewModel.onEvent(OnboardingEvent.AccessGranted)
                                     navController.navigate("browser") {
                                         popUpTo("onboarding") { inclusive = true }
                                     }
                                 },
                                 onChooseFolderInstead = { uri ->
                                     permissionGranted = true
-                                    scope.launch {
-                                        settingsRepo.updateCustomScanFolder(uri.toString())
-                                        settingsRepo.setOnboardingCompleted(true)
-                                        zipRepo.triggerRescan()
-                                    }
+                                    onboardingViewModel.onEvent(OnboardingEvent.FolderChosen(uri))
                                     navController.navigate("browser") {
                                         popUpTo("onboarding") { inclusive = true }
                                     }
@@ -166,12 +165,16 @@ class MainActivity : ComponentActivity() {
                             val encoded = backStackEntry.arguments?.getString("encodedPath") ?: ""
                             val path = URLDecoder.decode(encoded, StandardCharsets.UTF_8.toString())
                             val startFrame = backStackEntry.arguments?.getInt("startFrame") ?: 0
+                            val slideshowViewModel: SlideshowViewModel = viewModel()
+                            val slideshowState by slideshowViewModel.state.collectAsStateWithLifecycle()
                             SlideshowScreen(
                                 zipPath = path,
                                 initialFrameIndex = startFrame,
-                                settings = settings,
+                                settings = slideshowState.settings,
                                 zipRepository = zipRepo,
-                                onBack = { navController.popBackStack() }
+                                onBack = { navController.popBackStack() },
+                                state = slideshowState,
+                                onEvent = slideshowViewModel::onEvent
                             )
                         }
 
@@ -183,6 +186,8 @@ class MainActivity : ComponentActivity() {
                         ) { backStackEntry ->
                             val encoded = backStackEntry.arguments?.getString("encodedPath") ?: ""
                             val path = URLDecoder.decode(encoded, StandardCharsets.UTF_8.toString())
+                            val contentsViewModel: ZipContentsViewModel = viewModel()
+                            val contentsState by contentsViewModel.state.collectAsStateWithLifecycle()
                             ZipContentsScreen(
                                 zipPath = path,
                                 zipRepository = zipRepo,
@@ -190,29 +195,37 @@ class MainActivity : ComponentActivity() {
                                     val enc = URLEncoder.encode(targetPath, StandardCharsets.UTF_8.toString())
                                     navController.navigate("slideshow/$enc/$frameIndex")
                                 },
-                                onBack = { navController.popBackStack() }
+                                onBack = { navController.popBackStack() },
+                                state = contentsState,
+                                onEvent = contentsViewModel::onEvent
                             )
                         }
 
                         composable("storage_overview") {
+                            val storageViewModel: StorageOverviewViewModel = viewModel()
+                            val storageState by storageViewModel.state.collectAsStateWithLifecycle()
                             StorageOverviewScreen(
                                 volumeRepository = volumeRepo,
-                                zips = zips,
+                                zips = storageState.zips,
                                 onBack = { navController.popBackStack() }
                             )
                         }
 
                         composable("diagnostics") {
+                            val diagnosticsViewModel: VolumeDiagnosticsViewModel = viewModel()
+                            val diagnosticsState by diagnosticsViewModel.state.collectAsStateWithLifecycle()
                             VolumeDiagnosticsScreen(
                                 volumeRepository = volumeRepo,
-                                zips = zips,
+                                zips = diagnosticsState.zips,
                                 onBack = { navController.popBackStack() }
                             )
                         }
 
                         composable("settings") {
+                            val settingsViewModel: SettingsViewModel = viewModel()
+                            val settingsState by settingsViewModel.state.collectAsStateWithLifecycle()
                             SettingsScreen(
-                                settings = settings,
+                                settings = settingsState.settings,
                                 settingsRepository = settingsRepo,
                                 zipRepository = zipRepo,
                                 onNavigateToDiagnostics = {

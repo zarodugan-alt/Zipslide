@@ -79,6 +79,7 @@ import android.provider.DocumentsContract
 import com.example.data.AppSettings
 import com.example.data.VolumeRepository
 import com.example.data.ZipRepository
+import com.example.data.toUserMessage
 import com.example.data.model.BrowserFilter
 import com.example.data.model.SortBy
 import com.example.data.model.ViewMode
@@ -261,7 +262,7 @@ fun BrowserScreen(
                     }
                     context.startActivity(Intent.createChooser(intent, "Share ZipSlide Archive"))
                 } catch (e: Exception) {
-                    Toast.makeText(context, "Could not share file: ${e.message}", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, e.toUserMessage(), Toast.LENGTH_SHORT).show()
                 }
             }
 
@@ -279,7 +280,7 @@ fun BrowserScreen(
                     if (result.isSuccess) {
                         snackbarHostState.showSnackbar("Extracted ${result.getOrNull()?.name}")
                     } else {
-                        snackbarHostState.showSnackbar("Extraction failed: ${result.exceptionOrNull()?.message}")
+                        snackbarHostState.showSnackbar(result.exceptionOrNull()?.toUserMessage() ?: "That operation could not be completed. Try again.")
                     }
                 }
             }
@@ -609,7 +610,7 @@ fun BrowserScreen(
                             if (result.isSuccess) {
                                 snackbarHostState.showSnackbar("Renamed to $newName.zip")
                             } else {
-                                snackbarHostState.showSnackbar("Rename failed: ${result.exceptionOrNull()?.message}")
+                                snackbarHostState.showSnackbar(result.exceptionOrNull()?.toUserMessage() ?: "That operation could not be completed. Try again.")
                             }
                         }
                     },
@@ -632,7 +633,7 @@ fun BrowserScreen(
                             if (result.isSuccess) {
                                 snackbarHostState.showSnackbar("Deleted ${target.name}")
                             } else {
-                                snackbarHostState.showSnackbar("Delete failed: ${result.exceptionOrNull()?.message}")
+                                snackbarHostState.showSnackbar(result.exceptionOrNull()?.toUserMessage() ?: "That operation could not be completed. Try again.")
                             }
                         }
                     },

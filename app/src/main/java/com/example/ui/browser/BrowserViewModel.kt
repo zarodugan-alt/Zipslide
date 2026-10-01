@@ -9,6 +9,7 @@ import com.example.data.AppSettings
 import com.example.data.ExtractProgress
 import com.example.data.ScanProgress
 import com.example.data.ZipRepository
+import com.example.data.toUserMessage
 import com.example.data.model.BrowserFilter
 import com.example.data.model.SortBy
 import com.example.data.model.ZipItem
@@ -132,7 +133,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun setError(error: Throwable) = mutable.update { it.copy(error = error.message ?: "The operation could not be completed.") }
+    private fun setError(error: Throwable) = mutable.update { it.copy(error = error.toUserMessage()) }
 
     private fun List<ZipItem>.sortedFor(settings: AppSettings, seed: Long): List<ZipItem> {
         if (settings.sortBy == SortBy.RANDOM) return sortedBy { item -> item.path.hashCode().toLong() xor seed }
