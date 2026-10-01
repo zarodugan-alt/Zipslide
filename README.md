@@ -30,3 +30,15 @@ Slideshow archives are often large and distributed across internal storage, remo
 - **DataStore Preferences**: Fast, reactive settings management
 - **WorkManager**: Background storage scanning and thumbnail maintenance
 - **No Network / Zero Analytics**: Pure on-device local execution
+
+## Build
+
+The repository includes a pinned Gradle Wrapper and a GitHub Actions workflow that builds every pull request and push to `main` or an Arena branch. The workflow installs Android API 36.1, builds a debug APK, runs the local unit tests, and uploads the APK and reports as a workflow artifact.
+
+To build locally, use JDK 17 and an Android SDK containing platform `android-36.1` and Build Tools `36.0.0`:
+
+```bash
+./gradlew :app:assembleDebug :app:testDebugUnitTest
+```
+
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
