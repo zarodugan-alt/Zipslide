@@ -149,7 +149,7 @@ fun ZipContentsScreen(
                 }
                 Spacer(modifier = Modifier.width(ZipSlideTheme.spacing.s8))
                 Text(
-                    text = zipPath.substringAfterLast(File.separatorChar),
+                    text = zipPath.substringAfterLast('/'),
                     style = ZipSlideTheme.typography.titleM,
                     color = ZipSlideTheme.colors.textPrimary,
                     maxLines = 1,

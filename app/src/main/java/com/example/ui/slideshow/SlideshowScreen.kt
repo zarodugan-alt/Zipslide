@@ -167,7 +167,7 @@ fun SlideshowScreen(
                 CircularProgressIndicator(color = ZipSlideTheme.colors.accent)
                 Spacer(modifier = Modifier.height(ZipSlideTheme.spacing.s16))
                 Text(
-                    text = zipPath.substringAfterLast(File.separatorChar),
+                    text = zipPath.substringAfterLast('/'),
                     style = ZipSlideTheme.typography.caption,
                     color = ZipSlideTheme.colors.textTertiary
                 )
@@ -441,7 +441,7 @@ fun SlideshowScreen(
                         modifier = Modifier.weight(1f)
                     ) {
                         Text(
-                            text = zipPath.substringAfterLast(File.separatorChar),
+                            text = zipPath.substringAfterLast('/'),
                             style = ZipSlideTheme.typography.titleM,
                             color = Color.White,
                             maxLines = 1,
