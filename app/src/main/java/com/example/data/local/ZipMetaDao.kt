@@ -1,41 +1,57 @@
 package com.example.data.local
 
 import androidx.room.Dao
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Upsert
 import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface ZipMetaDao {
+    @Query("SELECT * FROM zip_meta WHERE path = :path")
+    suspend fun get(path: String): ZipMetaEntity?
 
-    @Query("SELECT * FROM zip_metadata")
-    fun getAllMeta(): Flow<List<ZipMetaEntity>>
+    @Query("SELECT * FROM zip_meta")
+    fun observeAll(): Flow<List<ZipMetaEntity>>
 
-    @Query("SELECT * FROM zip_metadata")
-    suspend fun getAllMetaList(): List<ZipMetaEntity>
+    @Query("SELECT * FROM zip_meta")
+    suspend fun all(): List<ZipMetaEntity>
 
-    @Query("SELECT * FROM zip_metadata WHERE path = :path LIMIT 1")
-    fun getMeta(path: String): Flow<ZipMetaEntity?>
+    @Upsert
+    suspend fun upsert(meta: ZipMetaEntity)
 
-    @Query("SELECT * FROM zip_metadata WHERE path = :path LIMIT 1")
-    suspend fun getMetaSync(path: String): ZipMetaEntity?
+    @Query("DELETE FROM zip_meta WHERE path = :path")
+    suspend fun delete(path: String)
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertOrUpdate(entity: ZipMetaEntity)
+    @Query("SELECT path FROM zip_meta")
+    suspend fun allPaths(): List<String>
+}
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertAll(entities: List<ZipMetaEntity>)
+@Dao
+interface ScanCacheDao {
+    @Query("SELECT * FROM scan_cache ORDER BY fileName COLLATE NOCASE")
+    fun observeAll(): Flow<List<ScanCacheEntry>>
 
-    @Query("UPDATE zip_metadata SET isFavorite = :isFavorite WHERE path = :path")
-    suspend fun updateFavorite(path: String, isFavorite: Boolean)
+    @Query("SELECT * FROM scan_cache")
+    suspend fun all(): List<ScanCacheEntry>
 
-    @Query("UPDATE zip_metadata SET lastFrameIndex = :frameIndex WHERE path = :path")
-    suspend fun updateLastFrame(path: String, frameIndex: Int)
+    @Query("SELECT * FROM scan_cache WHERE path = :path LIMIT 1")
+    suspend fun get(path: String): ScanCacheEntry?
 
-    @Query("DELETE FROM zip_metadata WHERE path = :path")
-    suspend fun deleteByPath(path: String)
+    @Upsert
+    suspend fun upsertAll(entries: List<ScanCacheEntry>)
 
-    @Query("DELETE FROM zip_metadata WHERE path NOT IN (:existingPaths)")
-    suspend fun deleteMissingPaths(existingPaths: List<String>)
+    @Query("DELETE FROM scan_cache WHERE path NOT IN (:live)")
+    suspend fun pruneMissing(live: List<String>)
+
+    @Query("DELETE FROM scan_cache")
+    suspend fun clear()
+
+    @Query("DELETE FROM scan_cache WHERE path = :path")
+    suspend fun delete(path: String)
+
+    @Query("DELETE FROM scan_cache WHERE volumeId = :volumeId")
+    suspend fun clearVolume(volumeId: String)
+
+    @Query("SELECT path FROM scan_cache WHERE volumeId = :volumeId")
+    suspend fun pathsForVolume(volumeId: String): List<String>
 }

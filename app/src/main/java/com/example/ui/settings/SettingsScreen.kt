@@ -151,7 +151,7 @@ fun SettingsScreen(
                 SettingRow(label = "Theme") {
                     SegmentedButtons(
                         options = listOf("Dark", "Light", "System"),
-                        selected = settings.theme.replaceFirstChar { it.uppercase() },
+                        selected = settings.theme.name.lowercase().replaceFirstChar { it.uppercase() },
                         onSelect = {
                             scope.launch { settingsRepository.updateTheme(it.lowercase()) }
                         }

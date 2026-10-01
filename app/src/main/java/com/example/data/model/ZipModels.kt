@@ -1,6 +1,13 @@
 package com.example.data.model
 
+import android.net.Uri
 import java.io.File
+
+/** The backing storage for an archive. A content URI is retained verbatim. */
+sealed interface ZipSource {
+    data class Direct(val file: File) : ZipSource
+    data class Saf(val uri: Uri, val displayName: String) : ZipSource
+}
 
 data class ZipItem(
     val path: String,
@@ -12,7 +19,7 @@ data class ZipItem(
     val isMounted: Boolean = true,
     val isSaf: Boolean = false,
     val imageCount: Int = 0,
-    val hasCover: Boolean = true,
+    val hasCover: Boolean = false,
     val coverEntryName: String? = null,
     val thumbnailPath: String? = null,
     val isEncrypted: Boolean = false,
@@ -21,7 +28,21 @@ data class ZipItem(
     val isFavorite: Boolean = false,
     val lastFrameIndex: Int = 0,
     val isReadOnly: Boolean = false,
-    val parentFolder: String = ""
+    val parentFolder: String = "",
+    val watchCount: Int = 0
+) {
+    /** Names used by repository contracts while preserving the established UI API. */
+    val displayName: String get() = name
+    val sizeBytes: Long get() = size
+    val source: ZipSource
+        get() = if (isSaf) ZipSource.Saf(Uri.parse(path), name) else ZipSource.Direct(File(path))
+}
+
+data class ZipEntryInfo(
+    val name: String,
+    val isDirectory: Boolean,
+    val sizeBytes: Long,
+    val compressedSize: Long
 )
 
 data class ZipEntryItem(
@@ -33,8 +54,22 @@ data class ZipEntryItem(
     val width: Int = 0,
     val height: Int = 0,
     val folderPath: String = ""
+) {
+    fun toInfo() = ZipEntryInfo(entryPath, false, size, compressedSize)
+}
+
+/** Canonical storage representation exposed by the repository layer. */
+data class Volume(
+    val id: String,
+    val label: String,
+    val root: File?,
+    val safUri: Uri?,
+    val isRemovable: Boolean,
+    val isMounted: Boolean,
+    val isReadable: Boolean
 )
 
+/** UI-compatible volume projection. */
 data class StorageVolumeInfo(
     val id: String,
     val name: String,
@@ -53,14 +88,28 @@ data class StorageVolumeInfo(
     val totalZipSize: Long = 0L
 )
 
+enum class ThemeMode { SYSTEM, LIGHT, DARK }
+
 enum class ViewMode {
-    SMALL, MEDIUM, LARGE, LIST
+    GRID_SMALL, GRID_MEDIUM, GRID_LARGE, LIST;
+
+    companion object {
+        // Compatibility names for the existing, intentionally unchanged UI shell.
+        val SMALL get() = GRID_SMALL
+        val MEDIUM get() = GRID_MEDIUM
+        val LARGE get() = GRID_LARGE
+    }
 }
 
 enum class SortBy {
-    NAME, MODIFIED, CREATED, SIZE, IMAGE_COUNT, RANDOM
+    NAME, DATE_MODIFIED, DATE_CREATED, SIZE, IMAGE_COUNT, RANDOM;
+
+    companion object {
+        val MODIFIED get() = DATE_MODIFIED
+        val CREATED get() = DATE_CREATED
+    }
 }
 
-enum class BrowserFilter {
-    ALL, FAVORITES, MISSING_COVER
-}
+enum class VolumeFilter { ALL, INTERNAL, SD, USB }
+
+enum class BrowserFilter { ALL, FAVORITES, MISSING_COVER }

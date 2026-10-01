@@ -5,24 +5,27 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 
-@Database(entities = [ZipMetaEntity::class], version = 1, exportSchema = false)
+@Database(
+    entities = [ZipMetaEntity::class, ScanCacheEntry::class],
+    version = 2,
+    exportSchema = false
+)
 abstract class ZipSlideDatabase : RoomDatabase() {
     abstract fun zipMetaDao(): ZipMetaDao
+    abstract fun scanCacheDao(): ScanCacheDao
 
     companion object {
-        @Volatile
-        private var INSTANCE: ZipSlideDatabase? = null
+        @Volatile private var instance: ZipSlideDatabase? = null
 
-        fun getInstance(context: Context): ZipSlideDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
+        fun getInstance(context: Context): ZipSlideDatabase =
+            instance ?: synchronized(this) {
+                instance ?: Room.databaseBuilder(
                     context.applicationContext,
                     ZipSlideDatabase::class.java,
                     "zipslide.db"
-                ).fallbackToDestructiveMigration().build()
-                INSTANCE = instance
-                instance
+                // The previous pre-release schema held scan data in zip metadata.
+                // It is intentionally disposable: revalidation recreates scan_cache.
+                ).fallbackToDestructiveMigration(dropAllTables = true).build().also { instance = it }
             }
-        }
     }
 }
