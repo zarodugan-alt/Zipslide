@@ -38,6 +38,8 @@ data class BrowserState(
     val appliedSearchQuery: String = "",
     val activeFilter: BrowserFilter = BrowserFilter.ALL,
     val menuTarget: ZipItem? = null,
+    /** Archives withheld by the strict `1.x` cover rule, surfaced as a subtitle hint. */
+    val hiddenByCoverRule: Int = 0,
     val sortSeed: Long = System.currentTimeMillis(),
     val operationProgress: ExtractProgress? = null,
     val error: String? = null
@@ -60,6 +62,7 @@ sealed interface BrowserEvent {
     data object SelectAll : BrowserEvent
     data object ClearSelection : BrowserEvent
     data object Rescan : BrowserEvent
+    data class SetOnlyNumberedCovers(val value: Boolean) : BrowserEvent
 }
 
 /** Browser state owner; composables only render this immutable state and dispatch events. */
@@ -78,6 +81,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 when (local.activeFilter) {
                     BrowserFilter.ALL -> true
                     BrowserFilter.FAVORITES -> item.isFavorite
+                    BrowserFilter.CONTINUE -> item.lastFrameIndex > 0 && item.lastFrameIndex < item.imageCount - 1
                     BrowserFilter.MISSING_COVER -> !item.hasCover && item.imageCount > 0
                 }
             }
@@ -88,8 +92,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         local.copy(items = items, filtered = filtered, settings = settings)
     }
 
-    val state: StateFlow<BrowserState> = combine(repositoryState, zips.scanProgress) { data, progress ->
-        data.copy(scanProgress = progress)
+    val state: StateFlow<BrowserState> = combine(
+        repositoryState,
+        zips.scanProgress,
+        zips.hiddenByCoverRule
+    ) { data, progress, hidden ->
+        data.copy(scanProgress = progress, hiddenByCoverRule = hidden)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BrowserState())
 
     fun onEvent(event: BrowserEvent) {
@@ -129,6 +137,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
             BrowserEvent.SelectAll -> mutable.update { old -> old.copy(selectedPaths = old.filtered.mapTo(linkedSetOf()) { it.path }, selectionMode = old.filtered.isNotEmpty()) }
             BrowserEvent.ClearSelection -> mutable.update { it.copy(selectedPaths = emptySet(), selectionMode = false) }
+            is BrowserEvent.SetOnlyNumberedCovers -> viewModelScope.launch {
+                settingsRepository.updateOnlyNumberedCovers(event.value)
+            }
             BrowserEvent.Rescan -> {
                 mutable.update { it.copy(sortSeed = Random.nextLong()) }
                 zips.triggerRescan()

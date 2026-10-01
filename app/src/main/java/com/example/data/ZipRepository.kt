@@ -106,8 +106,13 @@ class ZipRepository(
     private val repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val scanDispatcher = Dispatchers.IO.limitedParallelism(4)
     private val thumbnailDispatcher = Dispatchers.IO.limitedParallelism(4)
+    private val decodeDispatcher = Dispatchers.Default.limitedParallelism(3)
     private val thumbsDir = File(app.filesDir, "thumbs").apply { mkdirs() }
     private val memoryCache = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 8L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
+    }
+    /** Full-size playback frames. Kept separate from the small, long-lived thumbnail cache. */
+    private val frameCache = object : LruCache<String, Bitmap>((Runtime.getRuntime().maxMemory() / 4L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
     }
     private val inFlightMutex = Mutex()
@@ -127,8 +132,8 @@ class ZipRepository(
             scans.map { it to metaByPath[it.path] }
         }
 
-    /** Cached rows joined with metadata and current mount state. */
-    val zipsFlow: StateFlow<List<ZipItem>> = combine(
+    /** Cached rows joined with metadata and current mount state, before the cover rule. */
+    val allZipsFlow: StateFlow<List<ZipItem>> = combine(
         cachedWithMeta,
         volumeRepository.observeVolumes(),
         settingsRepository.settings
@@ -138,6 +143,23 @@ class ZipRepository(
             .filter { item -> item.matchesFilter(settings.volumeFilter) }
             .sort(settings.sortBy, settings.ascending, settings.naturalSort, stableSeed = 0L)
     }.distinctUntilChanged().stateIn(repositoryScope, SharingStarted.Eagerly, emptyList())
+
+    /**
+     * The browser library. When [AppSettings.onlyNumberedCovers] is on (the default) an archive is
+     * only listed when its cover resolved through the strict `1.x` rule, so folders of ordinary
+     * zips never pollute a slideshow library.
+     */
+    val zipsFlow: StateFlow<List<ZipItem>> = combine(
+        allZipsFlow,
+        settingsRepository.settings
+    ) { list, settings ->
+        if (settings.onlyNumberedCovers) list.filter { it.hasCover && it.imageCount > 0 } else list
+    }.distinctUntilChanged().stateIn(repositoryScope, SharingStarted.Eagerly, emptyList())
+
+    /** How many archives the strict `1.x` cover rule is currently hiding. */
+    val hiddenByCoverRule: StateFlow<Int> = combine(allZipsFlow, zipsFlow) { all, visible ->
+        (all.size - visible.size).coerceAtLeast(0)
+    }.distinctUntilChanged().stateIn(repositoryScope, SharingStarted.Eagerly, 0)
 
     init {
         // Room emits immediately; revalidation runs separately and never blocks first composition.
@@ -428,8 +450,12 @@ class ZipRepository(
         }
     } catch (_: Throwable) { emptyList() }
 
-    suspend fun readEntry(zip: ZipItem, entryName: String, targetPx: Int): Bitmap? =
-        openEntryBytes(zip, entryName)?.let { decodeSampled(it, targetPx) }
+    suspend fun readEntry(zip: ZipItem, entryName: String, targetPx: Int, highQuality: Boolean = false): Bitmap? =
+        withContext(decodeDispatcher) {
+            // Decoding used to inherit the caller's dispatcher, which put multi-megapixel work on
+            // the main thread during playback. It is now always off the UI thread.
+            openEntryBytes(zip, entryName)?.let { decodeSampled(it, targetPx, highQuality) }
+        }
 
     /** Holds one ZipFile for a direct-file slideshow; SAF archives retain their streaming backend. */
     suspend fun beginPlayback(zip: ZipItem) = withContext(Dispatchers.IO) {
@@ -441,12 +467,36 @@ class ZipRepository(
 
     suspend fun endPlayback(path: String) = withContext(Dispatchers.IO) {
         playbackMutex.withLock { playbackArchives.remove(path)?.close() }
+        frameCache.evictAll()
     }
 
-    suspend fun loadFrameBitmap(zipPath: String, entryName: String, maxDim: Int = 1600): Bitmap? {
+    /**
+     * Slideshow frame loader. Decoded frames are memoised so re-visiting a frame (scrubbing back,
+     * looping a short archive) is instant and never re-inflates the same JPEG twice.
+     */
+    suspend fun loadFrameBitmap(
+        zipPath: String,
+        entryName: String,
+        maxDim: Int = 1600,
+        highQuality: Boolean = true
+    ): Bitmap? {
+        val key = "$zipPath|$entryName|$maxDim|$highQuality"
+        frameCache.get(key)?.let { return it }
         val zip = findZip(zipPath) ?: ephemeralZip(zipPath)
-        return readEntry(zip, entryName, maxDim)
+        val deferred = inFlightMutex.withLock {
+            inFlight[key] ?: repositoryScope.async(decodeDispatcher) {
+                frameCache.get(key) ?: readEntry(zip, entryName, maxDim, highQuality)?.also { frameCache.put(key, it) }
+            }.also { inFlight[key] = it }
+        }
+        return try {
+            deferred.await()
+        } finally {
+            if (deferred.isCompleted) inFlightMutex.withLock { if (inFlight[key] === deferred) inFlight.remove(key) }
+        }
     }
+
+    /** Drops decoded frames for an archive once its playback session ends. */
+    fun releaseFrames() = frameCache.evictAll()
 
     private suspend fun openEntryBytes(zip: ZipItem, entryName: String): ByteArray? = withContext(Dispatchers.IO) {
         try {
@@ -565,7 +615,7 @@ class ZipRepository(
     fun shareUri(zip: ZipItem): Uri = if (zip.isSaf) Uri.parse(zip.path) else FileProvider.getUriForFile(app, "${app.packageName}.fileprovider", File(zip.path))
 
     suspend fun clearCache() = withContext(Dispatchers.IO) {
-        memoryCache.evictAll(); thumbsDir.listFiles()?.forEach(File::delete)
+        memoryCache.evictAll(); frameCache.evictAll(); thumbsDir.listFiles()?.forEach(File::delete)
     }
 
     suspend fun clearThumbnailCache() { clearCache(); rescanNow() }
@@ -661,13 +711,30 @@ class ZipRepository(
     private fun String.isImageEntry(): Boolean = !startsWith("__MACOSX/") && !substringAfterLast('/').startsWith('.') && substringAfterLast('.').lowercase() in IMAGE_EXT
     private fun ZipEntry.toItem() = ZipEntryItem(name, name.substringAfterLast('/'), name.isImageEntry(), size.coerceAtLeast(0), compressedSize.coerceAtLeast(0), folderPath = name.substringBeforeLast('/', ""))
     private fun File.canonicalOrAbsolute() = runCatching { canonicalPath }.getOrDefault(absolutePath)
-    private fun decodeSampled(bytes: ByteArray, targetPx: Int): Bitmap? {
+    /**
+     * Downsamples to the smallest power-of-two step that still covers [targetPx] on the longest
+     * edge. Sampling past the target is what made frames look soft, so the loop stops one step
+     * early and lets the GPU do the final, filtered scale.
+     */
+    private fun decodeSampled(bytes: ByteArray, targetPx: Int, highQuality: Boolean = false): Bitmap? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         var sample = 1
-        while (bounds.outWidth / sample > targetPx || bounds.outHeight / sample > targetPx) sample *= 2
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sample; inPreferredConfig = Bitmap.Config.RGB_565 })
+        while (
+            bounds.outWidth / (sample * 2) >= targetPx || bounds.outHeight / (sample * 2) >= targetPx
+        ) sample *= 2
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = if (highQuality) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565
+        }
+        return runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) }.getOrNull()
+            ?: runCatching {
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply {
+                    inSampleSize = sample * 2
+                    inPreferredConfig = Bitmap.Config.RGB_565
+                })
+            }.getOrNull()
     }
     private fun mimeFor(name: String) = when (name.substringAfterLast('.').lowercase()) {
         "png" -> "image/png"; "webp" -> "image/webp"; "gif" -> "image/gif"; else -> "image/jpeg"

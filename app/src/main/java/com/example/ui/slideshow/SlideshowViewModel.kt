@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ZipSlideApplication
 import com.example.data.AppSettings
+import com.example.data.model.SlideTransition
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.data.toUserMessage
@@ -27,6 +28,12 @@ sealed interface SlideshowEvent {
     data class Load(val path: String) : SlideshowEvent
     data class FrameChanged(val path: String, val frame: Int) : SlideshowEvent
     data class Finish(val path: String, val frame: Int) : SlideshowEvent
+    // Playback preferences changed from inside the viewer are persisted immediately.
+    data class SetInterval(val seconds: Float) : SlideshowEvent
+    data class SetShuffle(val value: Boolean) : SlideshowEvent
+    data class SetLoop(val value: Boolean) : SlideshowEvent
+    data class SetFitToScreen(val value: Boolean) : SlideshowEvent
+    data class SetTransition(val value: SlideTransition) : SlideshowEvent
 }
 
 /** Owns the archive playback session and closes the direct ZipFile when playback ends. */
@@ -58,6 +65,21 @@ class SlideshowViewModel(application: Application) : AndroidViewModel(applicatio
         is SlideshowEvent.Finish -> viewModelScope.launch {
             container.zips.finishWatching(event.path, event.frame)
             container.zips.endPlayback(event.path)
+        }
+        is SlideshowEvent.SetInterval -> viewModelScope.launch {
+            container.settings.updateSlideshowInterval(event.seconds)
+        }
+        is SlideshowEvent.SetShuffle -> viewModelScope.launch {
+            container.settings.updateSlideshowShuffle(event.value)
+        }
+        is SlideshowEvent.SetLoop -> viewModelScope.launch {
+            container.settings.updateSlideshowLoop(event.value)
+        }
+        is SlideshowEvent.SetFitToScreen -> viewModelScope.launch {
+            container.settings.updateSlideshowFitToScreen(event.value)
+        }
+        is SlideshowEvent.SetTransition -> viewModelScope.launch {
+            container.settings.updateSlideTransition(event.value)
         }
     }
 

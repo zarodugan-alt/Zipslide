@@ -57,6 +57,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -170,7 +171,17 @@ fun BrowserScreen(
         when (selectedFilter) {
             BrowserFilter.ALL -> zips
             BrowserFilter.FAVORITES -> zips.filter { it.isFavorite }
+            BrowserFilter.CONTINUE -> zips.filter { it.lastFrameIndex > 0 && it.lastFrameIndex < it.imageCount - 1 }
             BrowserFilter.MISSING_COVER -> zips.filter { !it.hasCover && it.imageCount > 0 }
+        }
+    }
+
+    // The "no 1.jpg" bucket cannot contain anything while the strict cover rule is on; fall back
+    // to All so the grid never looks mysteriously empty after toggling the rule.
+    LaunchedEffect(settings.onlyNumberedCovers, selectedFilter) {
+        if (settings.onlyNumberedCovers && selectedFilter == BrowserFilter.MISSING_COVER) {
+            fallbackSelectedFilter = BrowserFilter.ALL
+            onEvent(BrowserEvent.FilterChange(BrowserFilter.ALL))
         }
     }
 
@@ -349,8 +360,18 @@ fun BrowserScreen(
                             )
                             val totalSize = remember(zips) { formatBytes(zips.sumOf { it.size }) }
                             val volumeCount = volumeRepository.volumes.value.size
+                            val hidden = state?.hiddenByCoverRule ?: 0
+                            val subtitle = when {
+                                isScanning -> "Scanning storage…"
+                                zips.isEmpty() -> "No slideshows yet"
+                                else -> buildString {
+                                    append("${zips.size} slideshows · $totalSize · $volumeCount ")
+                                    append(if (volumeCount == 1) "volume" else "volumes")
+                                    if (hidden > 0 && settings.onlyNumberedCovers) append(" · $hidden hidden")
+                                }
+                            }
                             Text(
-                                text = if (isScanning) "Scanning…" else "${zips.size} zips · $totalSize · $volumeCount volumes",
+                                text = subtitle,
                                 style = ZipSlideTheme.typography.caption,
                                 color = ZipSlideTheme.colors.textSecondary
                             )
@@ -436,6 +457,18 @@ fun BrowserScreen(
                                         }
                                     )
                                     DropdownMenuItem(
+                                        text = {
+                                            Text(
+                                                text = if (settings.onlyNumberedCovers) "Showing only 1.x slideshows" else "Showing every zip",
+                                                color = if (settings.onlyNumberedCovers) ZipSlideTheme.colors.accent else ZipSlideTheme.colors.textPrimary
+                                            )
+                                        },
+                                        onClick = {
+                                            overflowMenuOpen = false
+                                            onEvent(BrowserEvent.SetOnlyNumberedCovers(!settings.onlyNumberedCovers))
+                                        }
+                                    )
+                                    DropdownMenuItem(
                                         text = { Text("Storage overview", color = ZipSlideTheme.colors.textPrimary) },
                                         onClick = {
                                             overflowMenuOpen = false
@@ -460,7 +493,8 @@ fun BrowserScreen(
                         onFilterSelected = {
                             fallbackSelectedFilter = it
                             onEvent(BrowserEvent.FilterChange(it))
-                        }
+                        },
+                        showMissingCover = !settings.onlyNumberedCovers
                     )
                     Spacer(modifier = Modifier.height(ZipSlideTheme.spacing.s12))
                 }
@@ -495,13 +529,17 @@ fun BrowserScreen(
                 // Context-aware empty state
                 val emptyTitle = when (selectedFilter) {
                     BrowserFilter.FAVORITES -> "No favorites yet"
+                    BrowserFilter.CONTINUE -> "Nothing in progress"
                     BrowserFilter.MISSING_COVER -> "All zips have covers"
-                    BrowserFilter.ALL -> "No zips here"
+                    BrowserFilter.ALL -> if (settings.onlyNumberedCovers) "No 1.x slideshows found" else "No zips here"
                 }
                 val emptyBody = when (selectedFilter) {
                     BrowserFilter.FAVORITES -> "Long-press any slideshow card and tap the star to add it to your favorites."
+                    BrowserFilter.CONTINUE -> "Slideshows you leave part-way through show up here so you can pick up where you stopped."
                     BrowserFilter.MISSING_COVER -> "Every zip slideshow in your library has a valid 1.jpg cover!"
-                    BrowserFilter.ALL -> "Point ZipSlide at the folder where your slideshow zips live."
+                    BrowserFilter.ALL -> if (settings.onlyNumberedCovers)
+                        "ZipSlide only lists archives that start with a 1.jpg frame. Turn off \"Only 1.x slideshows\" in the menu to see every zip."
+                    else "Point ZipSlide at the folder where your slideshow zips live."
                 }
                 val buttonText = if (selectedFilter == BrowserFilter.ALL) "Choose folder" else null
 

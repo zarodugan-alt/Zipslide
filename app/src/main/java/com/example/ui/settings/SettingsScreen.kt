@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -53,6 +54,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.AppSettings
+import com.example.data.model.SlideTransition
 import com.example.data.model.SortBy
 import com.example.data.model.ViewMode
 import com.example.design.ZipSlideTheme
@@ -240,6 +242,19 @@ fun SettingsScreen(
 
             // SCANNING SECTION
             item {
+                SectionHeader(title = "Library")
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "Only 1.x slideshows",
+                    description = "Hide archives that do not start with a 1.jpg / 1.png frame",
+                    checked = settings.onlyNumberedCovers,
+                    onCheckedChange = { onEvent(SettingsEvent.SetOnlyNumberedCovers(it)) }
+                )
+            }
+
+            item {
                 SectionHeader(title = "Scanning")
             }
 
@@ -389,6 +404,109 @@ fun SettingsScreen(
                     label = "Keep screen on while playing",
                     checked = settings.slideshowKeepScreenOn,
                     onCheckedChange = { onEvent(SettingsEvent.SetKeepScreenOn(it)) }
+                )
+            }
+
+            item {
+                SettingRow(label = "Transition") {
+                    Row(horizontalArrangement = Arrangement.spacedBy(ZipSlideTheme.spacing.s8)) {
+                        SlideTransition.entries.forEach { option ->
+                            val isSelected = settings.slideTransition == option
+                            Text(
+                                text = option.label,
+                                style = ZipSlideTheme.typography.caption.copy(fontWeight = FontWeight.SemiBold),
+                                color = if (isSelected) ZipSlideTheme.colors.accent else ZipSlideTheme.colors.textTertiary,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(ZipSlideTheme.radii.full))
+                                    .background(if (isSelected) ZipSlideTheme.colors.accentSoft else Color.Transparent)
+                                    .clickable { onEvent(SettingsEvent.SetTransition(option)) }
+                                    .padding(horizontal = ZipSlideTheme.spacing.s12, vertical = ZipSlideTheme.spacing.s4)
+                            )
+                        }
+                    }
+                }
+            }
+
+            item {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = ZipSlideTheme.spacing.screenGutter, vertical = ZipSlideTheme.spacing.s8)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(text = "Transition speed", style = ZipSlideTheme.typography.body)
+                        Text(
+                            text = "${settings.slideTransitionMs} ms",
+                            style = ZipSlideTheme.typography.bodyM,
+                            color = ZipSlideTheme.colors.accent
+                        )
+                    }
+                    Slider(
+                        value = settings.slideTransitionMs.toFloat(),
+                        onValueChange = { onEvent(SettingsEvent.SetTransitionMs(it.toInt())) },
+                        valueRange = 160f..1200f,
+                        steps = 12,
+                        colors = SliderDefaults.colors(
+                            thumbColor = ZipSlideTheme.colors.accent,
+                            activeTrackColor = ZipSlideTheme.colors.accent,
+                            inactiveTrackColor = ZipSlideTheme.colors.surfaceHigh
+                        )
+                    )
+                }
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "Tap edges to navigate",
+                    description = "Right third goes forward, left third goes back, centre toggles controls",
+                    checked = settings.slideTapZones,
+                    onCheckedChange = { onEvent(SettingsEvent.SetTapZones(it)) }
+                )
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "Remaining-time line",
+                    description = "Thin bar at the very top that shrinks as the frame runs out",
+                    checked = settings.slideProgressLine,
+                    onCheckedChange = { onEvent(SettingsEvent.SetProgressLine(it)) }
+                )
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "Slow drift (Ken Burns)",
+                    description = "Barely-there zoom that keeps still frames alive",
+                    checked = settings.slideKenBurns,
+                    onCheckedChange = { onEvent(SettingsEvent.SetKenBurns(it)) }
+                )
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "Hide system bars",
+                    checked = settings.slideImmersive,
+                    onCheckedChange = { onEvent(SettingsEvent.SetImmersive(it)) }
+                )
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "Haptic feedback",
+                    checked = settings.slideHaptics,
+                    onCheckedChange = { onEvent(SettingsEvent.SetSlideHaptics(it)) }
+                )
+            }
+
+            item {
+                SettingSwitchRow(
+                    label = "High quality frames",
+                    description = "Full-colour decoding; turn off on low-memory devices",
+                    checked = settings.slideHighQuality,
+                    onCheckedChange = { onEvent(SettingsEvent.SetHighQuality(it)) }
                 )
             }
 
@@ -567,18 +685,28 @@ fun SettingRow(
 fun SettingSwitchRow(
     label: String,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    description: String? = null
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(56.dp)
+            .heightIn(min = 56.dp)
             .clickable { onCheckedChange(!checked) }
-            .padding(horizontal = ZipSlideTheme.spacing.screenGutter),
+            .padding(horizontal = ZipSlideTheme.spacing.screenGutter, vertical = ZipSlideTheme.spacing.s8),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Text(text = label, style = ZipSlideTheme.typography.body, color = ZipSlideTheme.colors.textPrimary)
+        Column(modifier = Modifier.weight(1f).padding(end = ZipSlideTheme.spacing.s12)) {
+            Text(text = label, style = ZipSlideTheme.typography.body, color = ZipSlideTheme.colors.textPrimary)
+            if (description != null) {
+                Text(
+                    text = description,
+                    style = ZipSlideTheme.typography.caption,
+                    color = ZipSlideTheme.colors.textTertiary
+                )
+            }
+        }
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,

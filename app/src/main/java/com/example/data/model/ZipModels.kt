@@ -112,4 +112,20 @@ enum class SortBy {
 
 enum class VolumeFilter { ALL, INTERNAL, SD, USB }
 
-enum class BrowserFilter { ALL, FAVORITES, MISSING_COVER }
+enum class BrowserFilter { ALL, FAVORITES, CONTINUE, MISSING_COVER }
+
+/**
+ * Frame-to-frame motion used by the slideshow pager. Every style is driven by the live pager
+ * offset so a manual swipe and an automatic advance share exactly the same curve.
+ */
+enum class SlideTransition(val label: String) {
+    FADE("Dissolve"),
+    SLIDE("Glide"),
+    ZOOM("Zoom"),
+    DEPTH("Depth");
+
+    companion object {
+        fun fromName(value: String?): SlideTransition =
+            entries.firstOrNull { it.name.equals(value, ignoreCase = true) } ?: FADE
+    }
+}

@@ -10,6 +10,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.data.model.SlideTransition
 import com.example.data.model.SortBy
 import com.example.data.model.ThemeMode
 import com.example.data.model.ViewMode
@@ -38,6 +39,16 @@ data class AppSettings(
     val slideLoop: Boolean = true,
     val slideFitToScreen: Boolean = true,
     val slideKeepScreenOn: Boolean = true,
+    val slideTransition: SlideTransition = SlideTransition.FADE,
+    val slideTransitionMs: Int = 520,
+    val slideTapZones: Boolean = true,
+    val slideProgressLine: Boolean = true,
+    val slideHaptics: Boolean = true,
+    val slideKenBurns: Boolean = true,
+    val slideHighQuality: Boolean = true,
+    val slideImmersive: Boolean = true,
+    /** Only surface archives whose cover resolves through the strict `1.x` rule. */
+    val onlyNumberedCovers: Boolean = true,
     val thumbnailPx: Int = 512,
     val onboardingCompleted: Boolean = false
 ) {
@@ -71,6 +82,15 @@ class SettingsRepository(private val context: Context) {
         val slideLoop = booleanPreferencesKey("slide_loop")
         val slideFitToScreen = booleanPreferencesKey("slide_fit_to_screen")
         val slideKeepScreenOn = booleanPreferencesKey("slide_keep_screen_on")
+        val slideTransition = stringPreferencesKey("slide_transition")
+        val slideTransitionMs = intPreferencesKey("slide_transition_ms")
+        val slideTapZones = booleanPreferencesKey("slide_tap_zones")
+        val slideProgressLine = booleanPreferencesKey("slide_progress_line")
+        val slideHaptics = booleanPreferencesKey("slide_haptics")
+        val slideKenBurns = booleanPreferencesKey("slide_ken_burns")
+        val slideHighQuality = booleanPreferencesKey("slide_high_quality")
+        val slideImmersive = booleanPreferencesKey("slide_immersive")
+        val onlyNumberedCovers = booleanPreferencesKey("only_numbered_covers")
         val thumbnailPx = intPreferencesKey("thumbnail_px")
         val onboardingCompleted = booleanPreferencesKey("onboarding_completed")
     }
@@ -97,6 +117,15 @@ class SettingsRepository(private val context: Context) {
         slideLoop = prefs[Key.slideLoop] ?: true,
         slideFitToScreen = prefs[Key.slideFitToScreen] ?: true,
         slideKeepScreenOn = prefs[Key.slideKeepScreenOn] ?: true,
+        slideTransition = prefs.enum(Key.slideTransition, SlideTransition.FADE),
+        slideTransitionMs = (prefs[Key.slideTransitionMs] ?: 520).coerceIn(160, 1200),
+        slideTapZones = prefs[Key.slideTapZones] ?: true,
+        slideProgressLine = prefs[Key.slideProgressLine] ?: true,
+        slideHaptics = prefs[Key.slideHaptics] ?: true,
+        slideKenBurns = prefs[Key.slideKenBurns] ?: true,
+        slideHighQuality = prefs[Key.slideHighQuality] ?: true,
+        slideImmersive = prefs[Key.slideImmersive] ?: true,
+        onlyNumberedCovers = prefs[Key.onlyNumberedCovers] ?: true,
         thumbnailPx = prefs[Key.thumbnailPx] ?: 512,
         onboardingCompleted = prefs[Key.onboardingCompleted] ?: false
     )
@@ -129,6 +158,15 @@ class SettingsRepository(private val context: Context) {
         prefs[Key.slideLoop] = value.slideLoop
         prefs[Key.slideFitToScreen] = value.slideFitToScreen
         prefs[Key.slideKeepScreenOn] = value.slideKeepScreenOn
+        prefs[Key.slideTransition] = value.slideTransition.name
+        prefs[Key.slideTransitionMs] = value.slideTransitionMs
+        prefs[Key.slideTapZones] = value.slideTapZones
+        prefs[Key.slideProgressLine] = value.slideProgressLine
+        prefs[Key.slideHaptics] = value.slideHaptics
+        prefs[Key.slideKenBurns] = value.slideKenBurns
+        prefs[Key.slideHighQuality] = value.slideHighQuality
+        prefs[Key.slideImmersive] = value.slideImmersive
+        prefs[Key.onlyNumberedCovers] = value.onlyNumberedCovers
         prefs[Key.thumbnailPx] = value.thumbnailPx
         prefs[Key.onboardingCompleted] = value.onboardingCompleted
     }
@@ -148,6 +186,15 @@ class SettingsRepository(private val context: Context) {
     suspend fun updateSlideshowLoop(loop: Boolean) = update { it.copy(slideLoop = loop) }
     suspend fun updateSlideshowFitToScreen(fit: Boolean) = update { it.copy(slideFitToScreen = fit) }
     suspend fun updateSlideshowKeepScreenOn(keep: Boolean) = update { it.copy(slideKeepScreenOn = keep) }
+    suspend fun updateSlideTransition(transition: SlideTransition) = update { it.copy(slideTransition = transition) }
+    suspend fun updateSlideTransitionMs(duration: Int) = update { it.copy(slideTransitionMs = duration.coerceIn(160, 1200)) }
+    suspend fun updateSlideTapZones(enabled: Boolean) = update { it.copy(slideTapZones = enabled) }
+    suspend fun updateSlideProgressLine(enabled: Boolean) = update { it.copy(slideProgressLine = enabled) }
+    suspend fun updateSlideHaptics(enabled: Boolean) = update { it.copy(slideHaptics = enabled) }
+    suspend fun updateSlideKenBurns(enabled: Boolean) = update { it.copy(slideKenBurns = enabled) }
+    suspend fun updateSlideHighQuality(enabled: Boolean) = update { it.copy(slideHighQuality = enabled) }
+    suspend fun updateSlideImmersive(enabled: Boolean) = update { it.copy(slideImmersive = enabled) }
+    suspend fun updateOnlyNumberedCovers(enabled: Boolean) = update { it.copy(onlyNumberedCovers = enabled) }
     suspend fun updateThumbnailPx(px: Int) = update { it.copy(thumbnailPx = px.coerceIn(128, 2048)) }
     suspend fun setOnboardingCompleted(completed: Boolean) = update { it.copy(onboardingCompleted = completed) }
 

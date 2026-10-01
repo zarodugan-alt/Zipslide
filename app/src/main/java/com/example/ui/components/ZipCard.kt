@@ -1,7 +1,9 @@
 package com.example.ui.components
 
 import android.graphics.Bitmap
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -42,6 +44,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -72,11 +75,8 @@ fun ZipCard(
     var isPressed by remember { mutableStateOf(false) }
 
     val scale by animateFloatAsState(
-        targetValue = if (isPressed) 0.97f else 1.0f,
-        animationSpec = tween(
-            durationMillis = DesignTokens.Motion.FastDurationMs,
-            easing = DesignTokens.Motion.fastEasing
-        ),
+        targetValue = if (isPressed) 0.965f else 1.0f,
+        animationSpec = spring(dampingRatio = 0.68f, stiffness = 900f),
         label = "cardScale"
     )
 
@@ -143,11 +143,26 @@ fun ZipCard(
         if (isLoadingThumb) {
             ShimmerBlock(modifier = Modifier.fillMaxSize(), radius = ZipSlideTheme.radii.lg)
         } else if (bitmap != null) {
+            // Covers fade in rather than popping, and lift very slightly on press.
+            val coverAlpha = remember(zipItem.path) { Animatable(0f) }
+            LaunchedEffect(zipItem.path) {
+                coverAlpha.animateTo(
+                    targetValue = 1f,
+                    animationSpec = tween(DesignTokens.Motion.ExpressiveDurationMs, easing = DesignTokens.Motion.standardEasing)
+                )
+            }
             Image(
                 bitmap = bitmap!!,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = coverAlpha.value
+                        val zoom = if (isPressed) 1.03f else 1f
+                        scaleX = zoom
+                        scaleY = zoom
+                    }
             )
         } else {
             // Placeholder glyph for zero-images, encrypted, corrupt, or missing
@@ -210,11 +225,30 @@ fun ZipCard(
                     )
                 } else {
                     Text(
-                        text = "${zipItem.imageCount} · $formattedSize",
+                        text = "${zipItem.imageCount} frames · $formattedSize",
                         style = ZipSlideTheme.typography.caption,
                         color = ZipSlideTheme.colors.textSecondary
                     )
                 }
+            }
+        }
+
+        // Resume rail: how far through this archive the viewer already is.
+        if (zipItem.lastFrameIndex > 0 && zipItem.imageCount > 1) {
+            val progress = (zipItem.lastFrameIndex.toFloat() / (zipItem.imageCount - 1).toFloat()).coerceIn(0f, 1f)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .background(Color.White.copy(alpha = 0.18f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(progress)
+                        .height(3.dp)
+                        .background(ZipSlideTheme.colors.accent)
+                )
             }
         }
 
@@ -263,6 +297,21 @@ fun ZipCard(
                             modifier = Modifier.size(16.dp)
                         )
                     }
+                }
+            } else if (zipItem.watchCount > 0) {
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clip(CircleShape)
+                        .background(Color.Black.copy(alpha = 0.45f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = "Already viewed",
+                        tint = ZipSlideTheme.colors.accent,
+                        modifier = Modifier.size(13.dp)
+                    )
                 }
             } else if (!zipItem.hasCover && zipItem.imageCount > 0) {
                 // 10dp warning dot indicating missing 1.jpg cover

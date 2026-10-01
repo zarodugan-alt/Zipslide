@@ -257,7 +257,7 @@ fun ZipContentsScreen(
                         LaunchedEffect(item.entryPath) {
                             if (!thumbs.containsKey(item.entryPath)) {
                                 withContext(Dispatchers.IO) {
-                                    val bmp = zipRepository.loadFrameBitmap(zipPath, item.entryPath, 128)
+                                    val bmp = zipRepository.loadFrameBitmap(zipPath, item.entryPath, 256, highQuality = false)
                                     if (bmp != null) {
                                         thumbs[item.entryPath] = bmp.asImageBitmap()
                                     }
