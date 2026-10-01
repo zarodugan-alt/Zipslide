@@ -28,6 +28,10 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
+import com.example.data.ScanWorker
 import androidx.navigation.navArgument
 import com.example.data.AppSettings
 import com.example.design.ZipSlideAppTheme
@@ -226,7 +230,11 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (hasPermission()) {
-            (application as? ZipSlideApplication)?.zipRepository?.triggerRescan()
+            WorkManager.getInstance(this).enqueueUniqueWork(
+                "scan",
+                ExistingWorkPolicy.KEEP,
+                OneTimeWorkRequestBuilder<ScanWorker>().build()
+            )
         }
     }
 }
