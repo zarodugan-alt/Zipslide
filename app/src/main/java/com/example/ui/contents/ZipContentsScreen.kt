@@ -94,22 +94,22 @@ fun ZipContentsScreen(
     val thumbs = remember { mutableStateMapOf<String, androidx.compose.ui.graphics.ImageBitmap>() }
 
     LaunchedEffect(zipPath) {
-        withContext(Dispatchers.IO) {
-            val fileName = zipPath.substringAfterLast(File.separatorChar)
+        // Prefer the Room-backed item so SAF state, counts, and volume metadata are retained.
+        val item = zipRepository.findZipItem(zipPath) ?: run {
             val file = File(zipPath)
-            val item = ZipItem(
+            ZipItem(
                 path = zipPath,
-                name = fileName,
-                size = if (file.exists()) file.length() else 0L,
-                lastModified = if (file.exists()) file.lastModified() else 0L,
-                volumeId = "internal",
-                volumeName = "Storage",
+                name = file.name.ifBlank { zipPath.substringAfterLast('/') },
+                size = file.length(),
+                lastModified = file.lastModified(),
+                volumeId = "primary",
+                volumeName = "Internal storage",
                 isSaf = zipPath.startsWith("content://")
             )
-            zipItem = item
-            entries = zipRepository.getZipEntries(item)
-            isLoading = false
         }
+        zipItem = item
+        entries = zipRepository.getZipEntries(item)
+        isLoading = false
     }
 
     val imageEntries = remember(entries) { entries.filter { it.isImage } }

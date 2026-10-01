@@ -1,6 +1,9 @@
 package com.example
 
 import android.app.Application
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
 import com.example.data.SettingsRepository
 import com.example.data.VolumeRepository
 import com.example.data.ZipRepository
@@ -32,6 +35,11 @@ class ZipSlideApplication : Application() {
         super.onCreate()
         instance = this
         container = AppContainer(this)
+        WorkManager.getInstance(this).enqueueUniqueWork(
+            "scan",
+            ExistingWorkPolicy.KEEP,
+            OneTimeWorkRequestBuilder<com.example.data.ScanWorker>().build()
+        )
     }
 
     companion object {

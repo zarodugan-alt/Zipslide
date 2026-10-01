@@ -18,6 +18,7 @@ import com.example.data.model.ZipEntryInfo
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.util.NaturalOrderComparator
+import com.example.util.naturalKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -107,6 +108,8 @@ class ZipRepository(
     }
     private val inFlightMutex = Mutex()
     private val inFlight = mutableMapOf<String, kotlinx.coroutines.Deferred<Bitmap?>>()
+    private val playbackMutex = Mutex()
+    private val playbackArchives = mutableMapOf<String, ZipFile>()
     private val scanMutex = Mutex()
     private val _scanProgress = MutableStateFlow<ScanProgress>(ScanProgress.Idle)
     private val _isScanning = MutableStateFlow(false)
@@ -396,12 +399,12 @@ class ZipRepository(
     }
 
     suspend fun listImageEntries(zip: ZipItem): List<ZipEntryInfo> = withContext(Dispatchers.IO) {
-        readEntryMetadata(zip).filter { it.isImage }.sortedBy { it.entryPath.naturalKey() }.map { it.toInfo() }
+        readEntryMetadata(zip).filter { it.isImage }.sortedBy { naturalKey(it.entryPath) }.map { it.toInfo() }
     }
 
     // Existing screens consume the richer row type; it is backed by the same natural ordering.
     suspend fun getZipEntries(zip: ZipItem): List<ZipEntryItem> = withContext(Dispatchers.IO) {
-        readEntryMetadata(zip).sortedWith(compareBy<ZipEntryItem> { !it.isImage }.thenBy { it.entryPath.naturalKey() })
+        readEntryMetadata(zip).sortedWith(compareBy<ZipEntryItem> { !it.isImage }.thenBy { naturalKey(it.entryPath) })
     }
 
     private fun readEntryMetadata(zip: ZipItem): List<ZipEntryItem> = try {
@@ -424,6 +427,18 @@ class ZipRepository(
     suspend fun readEntry(zip: ZipItem, entryName: String, targetPx: Int): Bitmap? =
         openEntryBytes(zip, entryName)?.let { decodeSampled(it, targetPx) }
 
+    /** Holds one ZipFile for a direct-file slideshow; SAF archives retain their streaming backend. */
+    suspend fun beginPlayback(zip: ZipItem) = withContext(Dispatchers.IO) {
+        if (zip.isSaf) return@withContext
+        playbackMutex.withLock {
+            if (playbackArchives[zip.path] == null) playbackArchives[zip.path] = ZipFile(File(zip.path))
+        }
+    }
+
+    suspend fun endPlayback(path: String) = withContext(Dispatchers.IO) {
+        playbackMutex.withLock { playbackArchives.remove(path)?.close() }
+    }
+
     suspend fun loadFrameBitmap(zipPath: String, entryName: String, maxDim: Int = 1600): Bitmap? {
         val zip = findZip(zipPath) ?: ephemeralZip(zipPath)
         return readEntry(zip, entryName, maxDim)
@@ -443,8 +458,15 @@ class ZipRepository(
                 }
                 null
             } else {
-                ZipFile(File(zip.path)).use { archive ->
-                    archive.getEntry(entryName)?.let { entry -> archive.getInputStream(entry).use(InputStream::readBytes) }
+                val playbackArchive = playbackMutex.withLock { playbackArchives[zip.path] }
+                if (playbackArchive != null) {
+                    playbackArchive.getEntry(entryName)?.let { entry ->
+                        playbackArchive.getInputStream(entry).use(InputStream::readBytes)
+                    }
+                } else {
+                    ZipFile(File(zip.path)).use { archive ->
+                        archive.getEntry(entryName)?.let { entry -> archive.getInputStream(entry).use(InputStream::readBytes) }
+                    }
                 }
             }
         } catch (_: Throwable) { null }
@@ -563,7 +585,8 @@ class ZipRepository(
 
     fun updateMountStates() { volumeRepository.refreshVolumes() }
 
-    private suspend fun findZip(path: String): ZipItem? = zipsFlow.first().firstOrNull { it.path == path }
+    suspend fun findZipItem(path: String): ZipItem? = zipsFlow.first().firstOrNull { it.path == path }
+    private suspend fun findZip(path: String): ZipItem? = findZipItem(path)
     private fun ephemeralZip(path: String): ZipItem {
         val file = File(path)
         return ZipItem(path, file.name.ifBlank { path.substringAfterLast('/') }, file.length(), file.lastModified(), "primary", "Internal storage", isSaf = path.startsWith("content://"))
@@ -601,7 +624,7 @@ class ZipRepository(
         if (sortBy == SortBy.RANDOM) return sortedBy { (it.path.hashCode().toLong() xor stableSeed) }
         val comparator = compareBy<ZipItem> {
             when (sortBy) {
-                SortBy.NAME -> if (natural) it.name.naturalKey() else it.name.lowercase()
+                SortBy.NAME -> if (natural) naturalKey(it.name) else it.name.lowercase()
                 SortBy.DATE_MODIFIED, SortBy.DATE_CREATED -> it.lastModified.toString().padStart(20, '0')
                 SortBy.SIZE -> it.size.toString().padStart(20, '0')
                 SortBy.IMAGE_COUNT -> it.imageCount.toString().padStart(10, '0')
@@ -618,6 +641,13 @@ class ZipRepository(
         VolumeFilter.USB -> id.startsWith("usb:")
     }
 
+    private fun ZipItem.matchesFilter(filter: VolumeFilter) = when (filter) {
+        VolumeFilter.ALL -> true
+        VolumeFilter.INTERNAL -> volumeId == "primary"
+        VolumeFilter.SD -> volumeId.startsWith("sdcard:")
+        VolumeFilter.USB -> volumeId.startsWith("usb:")
+    }
+
     private fun openArchiveStream(zip: ZipItem): InputStream? = if (zip.isSaf) app.contentResolver.openInputStream(Uri.parse(zip.path)) else FileInputStream(File(zip.path))
     private fun invalidatePath(path: String) { thumbsDir.listFiles()?.filter { it.name.contains(path.hashCode().toString()) }?.forEach(File::delete); memoryCache.evictAll() }
     private fun sweepThumbnailCache(live: Set<String>) { if (live.isEmpty()) return; thumbsDir.listFiles()?.filter { it.isFile && System.currentTimeMillis() - it.lastModified() > 7 * 24 * 60 * 60 * 1000L }?.forEach(File::delete) }
@@ -625,7 +655,6 @@ class ZipRepository(
     private fun thumbnailFile(key: String) = File(thumbsDir, "$key.jpg")
     private fun safVolumeId(uri: String) = "saf:${uri.hashCode().toUInt().toString(16)}"
     private fun String.isImageEntry(): Boolean = !startsWith("__MACOSX/") && !substringAfterLast('/').startsWith('.') && substringAfterLast('.').lowercase() in IMAGE_EXT
-    private fun String.naturalKey() = lowercase().replace(Regex("(\\d+)")) { it.value.padStart(10, '0') }
     private fun ZipEntry.toItem() = ZipEntryItem(name, name.substringAfterLast('/'), name.isImageEntry(), size.coerceAtLeast(0), compressedSize.coerceAtLeast(0), folderPath = name.substringBeforeLast('/', ""))
     private fun File.canonicalOrAbsolute() = runCatching { canonicalPath }.getOrDefault(absolutePath)
     private fun decodeSampled(bytes: ByteArray, targetPx: Int): Bitmap? {

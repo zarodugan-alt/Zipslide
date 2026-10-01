@@ -1,6 +1,6 @@
 package com.example.ui.components
 
-import android.graphics.BitmapFactory
+import android.graphics.Bitmap
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
@@ -55,9 +55,6 @@ import androidx.compose.ui.unit.dp
 import com.example.data.model.ZipItem
 import com.example.design.DesignTokens
 import com.example.design.ZipSlideTheme
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import java.io.File
 
 @Composable
 fun ZipCard(
@@ -67,6 +64,8 @@ fun ZipCard(
     isSelectionMode: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
+    thumbnailPx: Int,
+    loadThumbnail: suspend () -> Bitmap?,
     modifier: Modifier = Modifier
 ) {
     val haptic = LocalHapticFeedback.current
@@ -81,28 +80,16 @@ fun ZipCard(
         label = "cardScale"
     )
 
-    // Async thumbnail loading from cached file
-    var bitmap by remember(zipItem.thumbnailPath) { mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null) }
-    var isLoadingThumb by remember(zipItem.thumbnailPath) { mutableStateOf(true) }
+    // The browser provides the repository thumbnail pipeline. The effect is cancelled when the
+    // card leaves composition, while the repository deduplicates concurrent requests by cache key.
+    var bitmap by remember(zipItem.path, zipItem.lastModified, thumbnailPx) {
+        mutableStateOf<androidx.compose.ui.graphics.ImageBitmap?>(null)
+    }
+    var isLoadingThumb by remember(zipItem.path, zipItem.lastModified, thumbnailPx) { mutableStateOf(true) }
 
-    LaunchedEffect(zipItem.thumbnailPath) {
-        val path = zipItem.thumbnailPath
-        if (path != null && File(path).exists()) {
-            withContext(Dispatchers.IO) {
-                try {
-                    val bmp = BitmapFactory.decodeFile(path)
-                    if (bmp != null) {
-                        bitmap = bmp.asImageBitmap()
-                    }
-                } catch (e: Exception) {
-                    bitmap = null
-                } finally {
-                    isLoadingThumb = false
-                }
-            }
-        } else {
-            isLoadingThumb = false
-        }
+    LaunchedEffect(zipItem.path, zipItem.lastModified, zipItem.size, thumbnailPx) {
+        bitmap = loadThumbnail()?.asImageBitmap()
+        isLoadingThumb = false
     }
 
     val formattedSize = remember(zipItem.size) { formatBytes(zipItem.size) }

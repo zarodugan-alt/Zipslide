@@ -119,23 +119,23 @@ fun SlideshowScreen(
 
     // Load zip and image entries
     LaunchedEffect(zipPath) {
-        withContext(Dispatchers.IO) {
-            val fileName = zipPath.substringAfterLast(File.separatorChar)
-            val mockZip = ZipItem(
+        // Resolve from the cache first; this preserves SAF and volume information on playback.
+        val item = zipRepository.findZipItem(zipPath) ?: run {
+            val file = File(zipPath)
+            ZipItem(
                 path = zipPath,
-                name = fileName,
-                size = 0L,
-                lastModified = 0L,
-                volumeId = "internal",
-                volumeName = "Storage",
+                name = file.name.ifBlank { zipPath.substringAfterLast('/') },
+                size = file.length(),
+                lastModified = file.lastModified(),
+                volumeId = "primary",
+                volumeName = "Internal storage",
                 isSaf = zipPath.startsWith("content://")
             )
-            zipItem = mockZip
-            val allEntries = zipRepository.getZipEntries(mockZip)
-            val imagesOnly = allEntries.filter { it.isImage }
-            entries = imagesOnly
-            isLoadingEntries = false
         }
+        zipRepository.beginPlayback(item)
+        zipItem = item
+        entries = zipRepository.getZipEntries(item).filter { it.isImage }
+        isLoadingEntries = false
     }
 
     // Keep screen on while playing
@@ -223,6 +223,17 @@ fun SlideshowScreen(
         onDispose {
             scope.launch {
                 zipRepository.updateLastFrame(zipPath, currentFrame)
+            }
+        }
+    }
+
+    // Persist a single completed viewing session when this destination leaves the back stack.
+    DisposableEffect(zipPath) {
+        onDispose {
+            val currentFrame = displayIndices.getOrNull(pagerState.currentPage) ?: 0
+            scope.launch {
+                zipRepository.finishWatching(zipPath, currentFrame)
+                zipRepository.endPlayback(zipPath)
             }
         }
     }

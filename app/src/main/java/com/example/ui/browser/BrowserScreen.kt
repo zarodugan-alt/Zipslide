@@ -574,7 +574,9 @@ fun BrowserScreen(
                                 } else {
                                     selectedZipForSheet = zip
                                 }
-                            }
+                            },
+                            thumbnailPx = settings.thumbnailPx,
+                            loadThumbnail = { zipRepository.thumbnail(zip, settings.thumbnailPx) }
                         )
                     }
                 }

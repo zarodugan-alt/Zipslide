@@ -23,6 +23,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -32,6 +33,7 @@ import com.example.data.AppSettings
 import com.example.design.ZipSlideAppTheme
 import com.example.design.ZipSlideTheme
 import com.example.ui.browser.BrowserScreen
+import com.example.ui.browser.BrowserViewModel
 import com.example.ui.contents.ZipContentsScreen
 import com.example.ui.onboarding.OnboardingScreen
 import com.example.ui.settings.SettingsScreen
@@ -66,9 +68,11 @@ class MainActivity : ComponentActivity() {
         val volumeRepo = app.volumeRepository
 
         setContent {
-            val settings by settingsRepo.settingsFlow.collectAsStateWithLifecycle(initialValue = AppSettings())
-            val zips by zipRepo.zipsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-            val isScanning by zipRepo.isScanning.collectAsStateWithLifecycle()
+            val browserViewModel: BrowserViewModel = viewModel()
+            val browserState by browserViewModel.state.collectAsStateWithLifecycle()
+            val settings = browserState.settings
+            val zips = browserState.items
+            val isScanning = browserState.scanProgress is com.example.data.ScanProgress.Scanning
 
             val scope = rememberCoroutineScope()
             val navController = rememberNavController()
