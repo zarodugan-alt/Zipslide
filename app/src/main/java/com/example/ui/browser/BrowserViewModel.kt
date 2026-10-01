@@ -33,7 +33,9 @@ data class BrowserState(
     val settings: AppSettings = AppSettings(),
     val selectedPaths: Set<String> = emptySet(),
     val selectionMode: Boolean = false,
+    /** Current field value; [appliedSearchQuery] changes after the 200 ms debounce. */
     val searchQuery: String = "",
+    val appliedSearchQuery: String = "",
     val activeFilter: BrowserFilter = BrowserFilter.ALL,
     val menuTarget: ZipItem? = null,
     val sortSeed: Long = System.currentTimeMillis(),
@@ -80,7 +82,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 }
             }
             .filter { item ->
-                local.searchQuery.isBlank() || item.name.contains(local.searchQuery, true) || item.path.contains(local.searchQuery, true)
+                local.appliedSearchQuery.isBlank() || item.name.contains(local.appliedSearchQuery, true) || item.path.contains(local.appliedSearchQuery, true)
             }
             .sortedFor(settings, local.sortSeed)
         local.copy(items = items, filtered = filtered, settings = settings)
@@ -106,10 +108,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 mutable.update { it.copy(operationProgress = null) }
             }
             is BrowserEvent.SearchChange -> {
+                // Keep typing responsive while applying results only after the debounce interval.
+                mutable.update { it.copy(searchQuery = event.query) }
                 searchJob?.cancel()
                 searchJob = viewModelScope.launch {
                     delay(200)
-                    mutable.update { it.copy(searchQuery = event.query) }
+                    mutable.update { it.copy(appliedSearchQuery = event.query) }
                 }
             }
             is BrowserEvent.FilterChange -> mutable.update { it.copy(activeFilter = event.filter) }

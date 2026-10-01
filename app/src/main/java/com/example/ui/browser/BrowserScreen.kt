@@ -123,15 +123,31 @@ fun BrowserScreen(
     var fallbackSelectedFilter by remember { mutableStateOf(BrowserFilter.ALL) }
     val selectedFilter = state?.activeFilter ?: fallbackSelectedFilter
     var searchOpen by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
+    var fallbackSearchQuery by remember { mutableStateOf("") }
+    val searchQuery = state?.searchQuery ?: fallbackSearchQuery
 
-    // Action sheet state
-    var selectedZipForSheet by remember { mutableStateOf<ZipItem?>(null) }
+    // The bottom-sheet target belongs to BrowserState; fallback supports isolated previews.
+    var fallbackSheetTarget by remember { mutableStateOf<ZipItem?>(null) }
+    val selectedZipForSheet = state?.menuTarget ?: fallbackSheetTarget
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
-    // Selection mode state
-    var isSelectionMode by remember { mutableStateOf(false) }
-    val selectedZipPaths = remember { mutableStateListOf<String>() }
+    // Selection comes from BrowserState in the app; mutable fallback keeps this reusable shell standalone.
+    var fallbackSelectionMode by remember { mutableStateOf(false) }
+    val fallbackSelectedPaths = remember { mutableStateListOf<String>() }
+    val isSelectionMode = state?.selectionMode ?: fallbackSelectionMode
+    val selectedZipPaths: Collection<String> = state?.selectedPaths ?: fallbackSelectedPaths
+    fun clearSelection() {
+        fallbackSelectionMode = false
+        fallbackSelectedPaths.clear()
+        onEvent(BrowserEvent.ClearSelection)
+    }
+    fun toggleSelection(path: String) {
+        if (state == null) {
+            if (!fallbackSelectedPaths.add(path)) fallbackSelectedPaths.remove(path)
+            fallbackSelectionMode = fallbackSelectedPaths.isNotEmpty()
+        }
+        onEvent(BrowserEvent.SelectToggle(path))
+    }
 
     // Dialog states
     var infoZip by remember { mutableStateOf<ZipItem?>(null) }
@@ -270,8 +286,7 @@ fun BrowserScreen(
     BackHandler(enabled = isSelectionMode || searchOpen) {
         if (searchOpen) searchOpen = false
         else if (isSelectionMode) {
-            isSelectionMode = false
-            selectedZipPaths.clear()
+            clearSelection()
         }
     }
 
@@ -290,10 +305,7 @@ fun BrowserScreen(
                         .padding(horizontal = ZipSlideTheme.spacing.s8),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = {
-                        isSelectionMode = false
-                        selectedZipPaths.clear()
-                    }) {
+                    IconButton(onClick = { clearSelection() }) {
                         Icon(Icons.Default.Close, contentDescription = "Close selection", tint = ZipSlideTheme.colors.textPrimary)
                     }
                     Text(
@@ -305,8 +317,7 @@ fun BrowserScreen(
                     IconButton(onClick = {
                         selectedZipPaths.mapNotNull { path -> zips.find { it.path == path } }
                             .forEach { onEvent(BrowserEvent.ToggleFavorite(it)) }
-                        isSelectionMode = false
-                        selectedZipPaths.clear()
+                        clearSelection()
                     }) {
                         Icon(Icons.Default.Star, contentDescription = "Favorite selected", tint = ZipSlideTheme.colors.accent)
                     }
@@ -416,9 +427,12 @@ fun BrowserScreen(
                                         text = { Text("Select all", color = ZipSlideTheme.colors.textPrimary) },
                                         onClick = {
                                             overflowMenuOpen = false
-                                            isSelectionMode = true
-                                            selectedZipPaths.clear()
-                                            selectedZipPaths.addAll(filteredZips.map { it.path })
+                                            if (state == null) {
+                                                fallbackSelectedPaths.clear()
+                                                fallbackSelectedPaths.addAll(filteredZips.map { it.path })
+                                                fallbackSelectionMode = fallbackSelectedPaths.isNotEmpty()
+                                            }
+                                            onEvent(BrowserEvent.SelectAll)
                                         }
                                     )
                                     DropdownMenuItem(
@@ -529,19 +543,17 @@ fun BrowserScreen(
                             isSelectionMode = isSelectionMode,
                             onClick = {
                                 if (isSelectionMode) {
-                                    if (isSelected) selectedZipPaths.remove(zip.path)
-                                    else selectedZipPaths.add(zip.path)
-                                    if (selectedZipPaths.isEmpty()) isSelectionMode = false
+                                    toggleSelection(zip.path)
                                 } else {
                                     actions.onPlaySlideshow(zip)
                                 }
                             },
                             onLongClick = {
                                 if (isSelectionMode) {
-                                    if (isSelected) selectedZipPaths.remove(zip.path)
-                                    else selectedZipPaths.add(zip.path)
+                                    toggleSelection(zip.path)
                                 } else {
-                                    selectedZipForSheet = zip
+                                    fallbackSheetTarget = zip
+                                    onEvent(BrowserEvent.CardLongPress(zip))
                                 }
                             },
                             thumbnailPx = settings.thumbnailPx,
@@ -556,7 +568,10 @@ fun BrowserScreen(
                 ActionSheet(
                     zipItem = selectedZipForSheet,
                     sheetState = sheetState,
-                    onDismissRequest = { selectedZipForSheet = null },
+                    onDismissRequest = {
+                        fallbackSheetTarget = null
+                        onEvent(BrowserEvent.SheetDismiss)
+                    },
                     actions = actions
                 )
             }
@@ -607,8 +622,7 @@ fun BrowserScreen(
                     onConfirm = {
                         isDeletingSelection = false
                         val targets = selectedZipPaths.toList()
-                        isSelectionMode = false
-                        selectedZipPaths.clear()
+                        clearSelection()
                         targets.mapNotNull { path -> zips.find { it.path == path } }
                             .forEach { onEvent(BrowserEvent.Delete(it)) }
                         scope.launch { snackbarHostState.showSnackbar("Deleting ${targets.size} zips") }
@@ -638,16 +652,18 @@ fun BrowserScreen(
                     allZips = zips,
                     query = searchQuery,
                     onQueryChange = {
-                        searchQuery = it
+                        fallbackSearchQuery = it
                         onEvent(BrowserEvent.SearchChange(it))
                     },
                     onClose = {
                         searchOpen = false
-                        searchQuery = ""
+                        fallbackSearchQuery = ""
+                        onEvent(BrowserEvent.SearchChange(""))
                     },
                     onZipSelected = { zip ->
                         searchOpen = false
-                        searchQuery = ""
+                        fallbackSearchQuery = ""
+                        onEvent(BrowserEvent.SearchChange(""))
                         actions.onPlaySlideshow(zip)
                     }
                 )
