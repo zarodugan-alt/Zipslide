@@ -12,8 +12,9 @@ import com.example.data.ZipRepository
 import com.example.data.toUserMessage
 import com.example.data.model.BrowserFilter
 import com.example.data.model.SortBy
+import com.example.data.model.SortOption
+import com.example.util.sortedForBrowser
 import com.example.data.model.ZipItem
-import com.example.util.naturalKey
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +39,8 @@ data class BrowserState(
     val appliedSearchQuery: String = "",
     val activeFilter: BrowserFilter = BrowserFilter.ALL,
     val menuTarget: ZipItem? = null,
+    /** Archives withheld by the strict `1.x` cover rule, surfaced as a subtitle hint. */
+    val hiddenByCoverRule: Int = 0,
     val sortSeed: Long = System.currentTimeMillis(),
     val operationProgress: ExtractProgress? = null,
     val error: String? = null
@@ -55,11 +58,12 @@ sealed interface BrowserEvent {
     data class Extract(val item: ZipItem, val destination: Uri) : BrowserEvent
     data class SearchChange(val query: String) : BrowserEvent
     data class FilterChange(val filter: BrowserFilter) : BrowserEvent
-    data class SortChange(val sortBy: SortBy) : BrowserEvent
+    data class SortChange(val option: SortOption) : BrowserEvent
     data class SelectToggle(val path: String) : BrowserEvent
     data object SelectAll : BrowserEvent
     data object ClearSelection : BrowserEvent
     data object Rescan : BrowserEvent
+    data class SetOnlyNumberedCovers(val value: Boolean) : BrowserEvent
 }
 
 /** Browser state owner; composables only render this immutable state and dispatch events. */
@@ -78,6 +82,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
                 when (local.activeFilter) {
                     BrowserFilter.ALL -> true
                     BrowserFilter.FAVORITES -> item.isFavorite
+                    BrowserFilter.CONTINUE -> item.lastFrameIndex > 0 && item.lastFrameIndex < item.imageCount - 1
                     BrowserFilter.MISSING_COVER -> !item.hasCover && item.imageCount > 0
                 }
             }
@@ -88,8 +93,12 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
         local.copy(items = items, filtered = filtered, settings = settings)
     }
 
-    val state: StateFlow<BrowserState> = combine(repositoryState, zips.scanProgress) { data, progress ->
-        data.copy(scanProgress = progress)
+    val state: StateFlow<BrowserState> = combine(
+        repositoryState,
+        zips.scanProgress,
+        zips.hiddenByCoverRule
+    ) { data, progress, hidden ->
+        data.copy(scanProgress = progress, hiddenByCoverRule = hidden)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), BrowserState())
 
     fun onEvent(event: BrowserEvent) {
@@ -118,9 +127,15 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
             is BrowserEvent.FilterChange -> mutable.update { it.copy(activeFilter = event.filter) }
             is BrowserEvent.SortChange -> viewModelScope.launch {
-                settingsRepository.update { it.copy(sortBy = event.sortBy) }
-                // Tapping Random intentionally gives a new stable session order.
-                if (event.sortBy == SortBy.RANDOM) mutable.update { it.copy(sortSeed = Random.nextLong()) }
+                // A preset carries both key and direction, so "Newest first" can never end up
+                // ascending because of a toggle left over from a previous choice.
+                settingsRepository.update {
+                    it.copy(sortBy = event.option.sortBy, ascending = event.option.ascending)
+                }
+                // Tapping Shuffle intentionally gives a new stable session order.
+                if (event.option.sortBy == SortBy.RANDOM) {
+                    mutable.update { it.copy(sortSeed = Random.nextLong()) }
+                }
             }
             is BrowserEvent.SelectToggle -> mutable.update { old ->
                 val next = old.selectedPaths.toMutableSet()
@@ -129,6 +144,9 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
             }
             BrowserEvent.SelectAll -> mutable.update { old -> old.copy(selectedPaths = old.filtered.mapTo(linkedSetOf()) { it.path }, selectionMode = old.filtered.isNotEmpty()) }
             BrowserEvent.ClearSelection -> mutable.update { it.copy(selectedPaths = emptySet(), selectionMode = false) }
+            is BrowserEvent.SetOnlyNumberedCovers -> viewModelScope.launch {
+                settingsRepository.updateOnlyNumberedCovers(event.value)
+            }
             BrowserEvent.Rescan -> {
                 mutable.update { it.copy(sortSeed = Random.nextLong()) }
                 zips.triggerRescan()
@@ -139,17 +157,7 @@ class BrowserViewModel(application: Application) : AndroidViewModel(application)
 
     private fun setError(error: Throwable) = mutable.update { it.copy(error = error.toUserMessage()) }
 
-    private fun List<ZipItem>.sortedFor(settings: AppSettings, seed: Long): List<ZipItem> {
-        if (settings.sortBy == SortBy.RANDOM) return sortedBy { item -> item.path.hashCode().toLong() xor seed }
-        val comparator = compareBy<ZipItem> { item ->
-            when (settings.sortBy) {
-                SortBy.NAME -> if (settings.naturalSort) naturalKey(item.name) else item.name.lowercase()
-                SortBy.DATE_MODIFIED, SortBy.DATE_CREATED -> item.lastModified.toString().padStart(20, '0')
-                SortBy.SIZE -> item.size.toString().padStart(20, '0')
-                SortBy.IMAGE_COUNT -> item.imageCount.toString().padStart(10, '0')
-                SortBy.RANDOM -> item.path
-            }
-        }
-        return if (settings.ascending) sortedWith(comparator) else sortedWith(comparator.reversed())
-    }
+    /** Delegates to the single shared comparator so the browser and the repository cannot drift. */
+    private fun List<ZipItem>.sortedFor(settings: AppSettings, seed: Long): List<ZipItem> =
+        sortedForBrowser(settings.sortBy, settings.ascending, settings.naturalSort, seed)
 }

@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -50,6 +51,8 @@ import com.example.ui.storage.StorageOverviewScreen
 import com.example.ui.storage.StorageOverviewViewModel
 import com.example.ui.storage.VolumeDiagnosticsScreen
 import com.example.ui.storage.VolumeDiagnosticsViewModel
+import com.example.util.VolumeKey
+import com.example.util.VolumeKeyDispatcher
 import kotlinx.coroutines.launch
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -241,6 +244,28 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * Hardware volume keys drive the viewer when it is on screen: volume down moves forward,
+     * volume up moves back, and holding either one auto-repeats for fast jumping. Both the down
+     * and the up event are swallowed so the system volume panel never appears mid-slideshow.
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        val key = keyCode.toVolumeKey()
+        if (key != null && VolumeKeyDispatcher.dispatch(key, (event?.repeatCount ?: 0) > 0)) return true
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode.toVolumeKey() != null && VolumeKeyDispatcher.isActive) return true
+        return super.onKeyUp(keyCode, event)
+    }
+
+    private fun Int.toVolumeKey(): VolumeKey? = when (this) {
+        KeyEvent.KEYCODE_VOLUME_DOWN -> VolumeKey.DOWN
+        KeyEvent.KEYCODE_VOLUME_UP -> VolumeKey.UP
+        else -> null
     }
 
     override fun onResume() {

@@ -96,7 +96,8 @@ fun VolumeBadge(
 fun FilterChipRow(
     selectedFilter: BrowserFilter,
     onFilterSelected: (BrowserFilter) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    showMissingCover: Boolean = true
 ) {
     val scrollState = rememberScrollState()
 
@@ -120,11 +121,19 @@ fun FilterChipRow(
             testTag = "filter_chip_favorites"
         )
         FilterChip(
-            label = "⚠ No 1.jpg",
-            isSelected = selectedFilter == BrowserFilter.MISSING_COVER,
-            onClick = { onFilterSelected(BrowserFilter.MISSING_COVER) },
-            testTag = "filter_chip_missing_cover"
+            label = "Continue",
+            isSelected = selectedFilter == BrowserFilter.CONTINUE,
+            onClick = { onFilterSelected(BrowserFilter.CONTINUE) },
+            testTag = "filter_chip_continue"
         )
+        if (showMissingCover) {
+            FilterChip(
+                label = "⚠ No 1.jpg",
+                isSelected = selectedFilter == BrowserFilter.MISSING_COVER,
+                onClick = { onFilterSelected(BrowserFilter.MISSING_COVER) },
+                testTag = "filter_chip_missing_cover"
+            )
+        }
     }
 }
 

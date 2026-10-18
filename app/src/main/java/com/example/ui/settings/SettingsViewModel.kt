@@ -5,7 +5,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ZipSlideApplication
 import com.example.data.AppSettings
+import com.example.data.model.SlideTransition
+import com.example.data.model.FrameOrder
 import com.example.data.model.SortBy
+import com.example.data.model.SortOption
 import com.example.data.model.ViewMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -24,6 +27,8 @@ sealed interface SettingsEvent {
     data class SetTheme(val value: String) : SettingsEvent
     data class SetViewMode(val mode: ViewMode) : SettingsEvent
     data class SetSort(val sortBy: SortBy) : SettingsEvent
+    data class SetSortOption(val option: SortOption) : SettingsEvent
+    data class SetFrameOrder(val order: FrameOrder) : SettingsEvent
     data class SetAscending(val value: Boolean) : SettingsEvent
     data class SetStorageSource(val value: String) : SettingsEvent
     data class SetCustomScanFolder(val uri: String) : SettingsEvent
@@ -38,6 +43,18 @@ sealed interface SettingsEvent {
     data class SetLoop(val value: Boolean) : SettingsEvent
     data class SetFitToScreen(val value: Boolean) : SettingsEvent
     data class SetKeepScreenOn(val value: Boolean) : SettingsEvent
+    data class SetTransition(val value: SlideTransition) : SettingsEvent
+    data class SetTransitionMs(val value: Int) : SettingsEvent
+    data class SetTapZones(val value: Boolean) : SettingsEvent
+    data class SetVolumeKeys(val value: Boolean) : SettingsEvent
+    data class SetVolumeKeysInverted(val value: Boolean) : SettingsEvent
+    data class SetLockRotation(val value: Boolean) : SettingsEvent
+    data class SetProgressLine(val value: Boolean) : SettingsEvent
+    data class SetSlideHaptics(val value: Boolean) : SettingsEvent
+    data class SetKenBurns(val value: Boolean) : SettingsEvent
+    data class SetHighQuality(val value: Boolean) : SettingsEvent
+    data class SetImmersive(val value: Boolean) : SettingsEvent
+    data class SetOnlyNumberedCovers(val value: Boolean) : SettingsEvent
     data object ClearThumbnailCache : SettingsEvent
     data object RegenerateThumbnails : SettingsEvent
     data object Rescan : SettingsEvent
@@ -58,6 +75,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             is SettingsEvent.SetTheme -> container.settings.updateTheme(event.value)
             is SettingsEvent.SetViewMode -> container.settings.updateViewMode(event.mode)
             is SettingsEvent.SetSort -> container.settings.updateSortBy(event.sortBy)
+            is SettingsEvent.SetSortOption -> container.settings.updateSortOption(event.option)
+            is SettingsEvent.SetFrameOrder -> container.settings.updateFrameOrder(event.order)
             is SettingsEvent.SetAscending -> container.settings.updateSortAscending(event.value)
             is SettingsEvent.SetStorageSource -> {
                 container.settings.updateStorageSource(event.value)
@@ -84,6 +103,18 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             is SettingsEvent.SetLoop -> container.settings.updateSlideshowLoop(event.value)
             is SettingsEvent.SetFitToScreen -> container.settings.updateSlideshowFitToScreen(event.value)
             is SettingsEvent.SetKeepScreenOn -> container.settings.updateSlideshowKeepScreenOn(event.value)
+            is SettingsEvent.SetTransition -> container.settings.updateSlideTransition(event.value)
+            is SettingsEvent.SetTransitionMs -> container.settings.updateSlideTransitionMs(event.value)
+            is SettingsEvent.SetTapZones -> container.settings.updateSlideTapZones(event.value)
+            is SettingsEvent.SetVolumeKeys -> container.settings.updateSlideVolumeKeys(event.value)
+            is SettingsEvent.SetVolumeKeysInverted -> container.settings.updateSlideVolumeKeysInverted(event.value)
+            is SettingsEvent.SetLockRotation -> container.settings.updateSlideLockRotation(event.value)
+            is SettingsEvent.SetProgressLine -> container.settings.updateSlideProgressLine(event.value)
+            is SettingsEvent.SetSlideHaptics -> container.settings.updateSlideHaptics(event.value)
+            is SettingsEvent.SetKenBurns -> container.settings.updateSlideKenBurns(event.value)
+            is SettingsEvent.SetHighQuality -> container.settings.updateSlideHighQuality(event.value)
+            is SettingsEvent.SetImmersive -> container.settings.updateSlideImmersive(event.value)
+            is SettingsEvent.SetOnlyNumberedCovers -> container.settings.updateOnlyNumberedCovers(event.value)
             SettingsEvent.ClearThumbnailCache -> runWorking { container.zips.clearThumbnailCache() }
             SettingsEvent.RegenerateThumbnails -> runWorking { container.zips.regenerateAll() }
             SettingsEvent.Rescan -> container.zips.triggerRescan()

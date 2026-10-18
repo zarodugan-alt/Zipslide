@@ -5,9 +5,11 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ZipSlideApplication
 import com.example.data.AppSettings
+import com.example.data.model.SlideTransition
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.data.toUserMessage
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -27,6 +29,12 @@ sealed interface SlideshowEvent {
     data class Load(val path: String) : SlideshowEvent
     data class FrameChanged(val path: String, val frame: Int) : SlideshowEvent
     data class Finish(val path: String, val frame: Int) : SlideshowEvent
+    // Playback preferences changed from inside the viewer are persisted immediately.
+    data class SetInterval(val seconds: Float) : SlideshowEvent
+    data class SetShuffle(val value: Boolean) : SlideshowEvent
+    data class SetLoop(val value: Boolean) : SlideshowEvent
+    data class SetFitToScreen(val value: Boolean) : SlideshowEvent
+    data class SetTransition(val value: SlideTransition) : SlideshowEvent
 }
 
 /** Owns the archive playback session and closes the direct ZipFile when playback ends. */
@@ -43,7 +51,10 @@ class SlideshowViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val zip = container.zips.findZipItem(event.path) ?: fallback(event.path)
                 container.zips.beginPlayback(zip)
-                val images = container.zips.getZipEntries(zip).filter { it.isImage }
+                // Playback order comes from the frame-order setting alone — never from the
+                // library sort the browser happens to be using.
+                val order = container.settings.settings.first().frameOrder
+                val images = container.zips.playbackFrames(zip, order)
                 // No pager will be composed for an archive without images, so release it now.
                 if (images.isEmpty()) container.zips.endPlayback(zip.path)
                 local.value = SlideshowState(zip = zip, images = images, loading = false)
@@ -58,6 +69,21 @@ class SlideshowViewModel(application: Application) : AndroidViewModel(applicatio
         is SlideshowEvent.Finish -> viewModelScope.launch {
             container.zips.finishWatching(event.path, event.frame)
             container.zips.endPlayback(event.path)
+        }
+        is SlideshowEvent.SetInterval -> viewModelScope.launch {
+            container.settings.updateSlideshowInterval(event.seconds)
+        }
+        is SlideshowEvent.SetShuffle -> viewModelScope.launch {
+            container.settings.updateSlideshowShuffle(event.value)
+        }
+        is SlideshowEvent.SetLoop -> viewModelScope.launch {
+            container.settings.updateSlideshowLoop(event.value)
+        }
+        is SlideshowEvent.SetFitToScreen -> viewModelScope.launch {
+            container.settings.updateSlideshowFitToScreen(event.value)
+        }
+        is SlideshowEvent.SetTransition -> viewModelScope.launch {
+            container.settings.updateSlideTransition(event.value)
         }
     }
 
