@@ -60,6 +60,28 @@ jobs:
       - name: Build and run unit tests
         run: ./gradlew --no-daemon --stacktrace :app:assembleDebug :app:testDebugUnitTest
 
+      # Failures are surfaced as workflow annotations, which stay readable from the API and the
+      # PR view without having to download and unzip the HTML report.
+      - name: Annotate failing unit tests
+        if: failure()
+        shell: bash
+        run: |
+          shopt -s globstar nullglob
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          found = False
+          for path in glob.glob("app/build/test-results/**/*.xml", recursive=True):
+              for case in ET.parse(path).getroot().iter("testcase"):
+                  for problem in list(case.findall("failure")) + list(case.findall("error")):
+                      found = True
+                      detail = " ".join((problem.get("message") or problem.text or "").split())[:700]
+                      print(f"::error title={case.get('classname')}.{case.get('name')}::{detail}")
+          if not found:
+              print("::error title=Build::No test failures recorded - the build itself failed.")
+          PY
+
       - name: Upload debug APK and reports
         if: always()
         uses: actions/upload-artifact@v7

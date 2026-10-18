@@ -20,8 +20,12 @@ fun List<ZipItem>.sortedForBrowser(
     seed: Long
 ): List<ZipItem> {
     if (sortBy == SortBy.RANDOM) {
-        // Stable for a given seed so the grid does not reshuffle on every recomposition.
-        return sortedBy { item -> (item.path.hashCode().toLong() * 31L) xor seed }
+        // Stable for a given seed so the grid does not reshuffle on every recomposition, but
+        // genuinely re-ordered when the seed changes. The previous `hash xor seed` only disturbed
+        // the low bits, so two different seeds almost always produced the identical "random"
+        // order — tapping Shuffle again appeared to do nothing. A SplitMix64 finalizer avalanches
+        // every bit instead.
+        return sortedBy { item -> shuffleKey(item.path.hashCode().toLong(), seed) }
     }
 
     val comparator: Comparator<ZipItem> = when (sortBy) {
@@ -41,4 +45,12 @@ fun List<ZipItem>.sortedForBrowser(
     // A deterministic tie-break keeps equal keys (same size, same date, never viewed) stable.
     val stable = comparator.thenBy { naturalKey(it.name) }.thenBy { it.path }
     return if (ascending) sortedWith(stable) else sortedWith(stable.reversed())
+}
+
+/** SplitMix64's finalizer: cheap, allocation-free, and mixes seed changes through all 64 bits. */
+private fun shuffleKey(value: Long, seed: Long): Long {
+    var z = value * -0x61c8864680b583ebL + seed * -0x7ee3623a03d3c83fL
+    z = (z xor (z ushr 30)) * -0x40a7b892e31b1a47L
+    z = (z xor (z ushr 27)) * -0x6b2fb644ecceee15L
+    return z xor (z ushr 31)
 }
