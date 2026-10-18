@@ -112,6 +112,7 @@ import com.example.data.ZipRepository
 import com.example.data.model.SlideTransition
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
+import com.example.util.naturalKey
 import com.example.data.toUserMessage
 import com.example.design.DesignTokens
 import com.example.design.ZipSlideTheme
@@ -255,9 +256,23 @@ fun SlideshowScreen(
         if (isShuffle) entries.indices.shuffled(Random(zipPath.hashCode())) else entries.indices.toList()
     }
 
+    // Frame numbers travel through the rest of the app (resume points, "open this image" taps,
+    // the browser's progress rail) in natural order, because that is how every list displays them.
+    // Playback order may differ — Reverse, As stored, Shuffle — so translate at the boundary
+    // instead of letting two meanings of "frame 7" circulate. With the default Natural order both
+    // maps are the identity.
+    val naturalOrder = remember(entries) { entries.sortedWith(compareBy { naturalKey(it.entryPath) }) }
+    val naturalIndexOf = remember(naturalOrder) {
+        naturalOrder.withIndex().associate { (index, entry) -> entry.entryPath to index }
+    }
+    fun toNaturalFrame(entryIndex: Int): Int =
+        entries.getOrNull(entryIndex)?.let { naturalIndexOf[it.entryPath] } ?: entryIndex
+
     val pageCount = displayIndices.size
-    val startIndex = remember(pageCount) {
-        val resumeAt = displayIndices.indexOf(initialFrameIndex).takeIf { it >= 0 } ?: initialFrameIndex
+    val startIndex = remember(pageCount, naturalOrder) {
+        val wanted = naturalOrder.getOrNull(initialFrameIndex)?.entryPath
+        val entryIndex = entries.indexOfFirst { it.entryPath == wanted }.takeIf { it >= 0 } ?: initialFrameIndex
+        val resumeAt = displayIndices.indexOf(entryIndex).takeIf { it >= 0 } ?: entryIndex
         resumeAt.coerceIn(0, (pageCount - 1).coerceAtLeast(0))
     }
     val pagerState = rememberPagerState(initialPage = startIndex, pageCount = { pageCount })
@@ -300,7 +315,7 @@ fun SlideshowScreen(
     )
 
     fun persistFrame(page: Int) {
-        val frame = displayIndices.getOrNull(page) ?: return
+        val frame = displayIndices.getOrNull(page)?.let(::toNaturalFrame) ?: return
         if (state != null) onEvent(SlideshowEvent.FrameChanged(zipPath, frame))
         else scope.launch { zipRepository.updateLastFrame(zipPath, frame) }
     }
@@ -312,7 +327,7 @@ fun SlideshowScreen(
 
     DisposableEffect(zipPath) {
         onDispose {
-            val frame = displayIndices.getOrNull(pagerState.currentPage) ?: 0
+            val frame = displayIndices.getOrNull(pagerState.currentPage)?.let(::toNaturalFrame) ?: 0
             if (state != null) onEvent(SlideshowEvent.Finish(zipPath, frame))
             else scope.launch {
                 zipRepository.finishWatching(zipPath, frame)
