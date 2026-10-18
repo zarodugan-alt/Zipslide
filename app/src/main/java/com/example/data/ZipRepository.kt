@@ -11,6 +11,7 @@ import com.example.data.local.ScanCacheDao
 import com.example.data.local.ScanCacheEntry
 import com.example.data.local.ZipMetaDao
 import com.example.data.local.ZipMetaEntity
+import com.example.data.model.FrameOrder
 import com.example.data.model.SortBy
 import com.example.data.model.Volume
 import com.example.data.model.VolumeFilter
@@ -18,6 +19,7 @@ import com.example.data.model.ZipEntryInfo
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.util.CoverRule
+import com.example.util.sortedForBrowser
 import com.example.util.naturalKey
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -50,13 +52,27 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStream
+import java.nio.charset.Charset
+import java.nio.file.Files
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.zip.ZipEntry
 import java.util.zip.ZipException
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 import kotlin.coroutines.coroutineContext
+import kotlin.random.Random
 
 private const val SCAN_BATCH_SIZE = 50
+/** Archive extensions treated as slideshow containers. `.cbz` is a zip by another name. */
+private val ARCHIVE_EXT = setOf("zip", "cbz")
+/** Bumped when inspection logic changes, forcing cached rows to be re-read once. */
+private const val SCAN_RULE_VERSION = 2
+private const val MAX_SCAN_DEPTH = 12
+/** UTF-8 first, then the historic zip default used by older Windows and Japanese archivers. */
+private val ARCHIVE_CHARSETS: List<Charset> = listOfNotNull(
+    Charsets.UTF_8,
+    runCatching { Charset.forName("IBM437") }.getOrNull()
+)
 
 sealed interface ScanProgress {
     data object Idle : ScanProgress
@@ -244,18 +260,26 @@ class ZipRepository(
     ): List<ScanCacheEntry> = withContext(scanDispatcher) {
         val root = volume.root ?: return@withContext emptyList()
         val result = mutableListOf<ScanCacheEntry>()
+        // Symlinked storage (/sdcard -> /storage/emulated/0, OEM "Internal" aliases) used to make
+        // the walker re-enter the same tree and report duplicates; canonical paths close the loop.
+        val visitedDirectories = HashSet<String>()
         fun walk(directory: File, depth: Int) {
             coroutineContext.ensureActive()
-            if (depth > 8 || !directory.canRead()) return
+            if (depth > MAX_SCAN_DEPTH || !directory.canRead()) return
+            if (!visitedDirectories.add(directory.canonicalOrAbsolute())) return
             directory.listFiles()?.forEach { file ->
                 val name = file.name
                 if (file.isDirectory) {
-                    if (name.equals("Android", true) || name.equals(".thumbnails", true) || (!settings.showHidden && name.startsWith('.'))) return@forEach
+                    if (name.equals("Android", true) || name.equals(".thumbnails", true) || name.equals("LOST.DIR", true)) return@forEach
+                    if (!settings.showHidden && name.startsWith('.')) return@forEach
+                    if (File(file, ".nomedia").exists() && !settings.showHidden) return@forEach
                     if (settings.includeSubfolders) walk(file, depth + 1)
-                } else if (name.endsWith(".zip", true) && (settings.showHidden || !name.startsWith('.'))) {
+                } else if (file.isArchiveCandidate() && (settings.showHidden || !name.startsWith('.'))) {
                     val path = file.canonicalOrAbsolute()
                     val unchanged = existing[path]?.takeIf {
-                        it.sizeBytes == file.length() && it.lastModified == file.lastModified()
+                        it.sizeBytes == file.length() &&
+                            it.lastModified == file.lastModified() &&
+                            it.ruleVersion == SCAN_RULE_VERSION
                     }
                     result += unchanged ?: inspectDirect(file, volume.id)
                 }
@@ -274,7 +298,7 @@ class ZipRepository(
         val volumeId = safVolumeId(root.toString())
         fun visit(parentDocumentId: String, depth: Int) {
             coroutineContext.ensureActive()
-            if (depth > 8) return
+            if (depth > MAX_SCAN_DEPTH) return
             val children = DocumentsContract.buildChildDocumentsUriUsingTree(root, parentDocumentId)
             val projection = arrayOf(
                 DocumentsContract.Document.COLUMN_DOCUMENT_ID,
@@ -296,12 +320,14 @@ class ZipRepository(
                     if (isDirectory) {
                         if (name.equals("Android", true) || name.equals(".thumbnails", true) || (!settings.showHidden && name.startsWith('.'))) continue
                         if (settings.includeSubfolders) visit(documentId, depth + 1)
-                    } else if (name.endsWith(".zip", true) && (settings.showHidden || !name.startsWith('.'))) {
+                    } else if (name.isArchiveName() && (settings.showHidden || !name.startsWith('.'))) {
                         val uri = DocumentsContract.buildDocumentUriUsingTree(root, documentId)
                         val path = uri.toString()
                         val fileSize = cursor.getLong(size)
                         val lastModified = cursor.getLong(modified)
-                        val unchanged = existing[path]?.takeIf { it.sizeBytes == fileSize && it.lastModified == lastModified }
+                        val unchanged = existing[path]?.takeIf {
+                            it.sizeBytes == fileSize && it.lastModified == lastModified && it.ruleVersion == SCAN_RULE_VERSION
+                        }
                         result += unchanged ?: inspectSaf(uri, name, fileSize, lastModified, volumeId)
                     }
                 }
@@ -311,20 +337,59 @@ class ZipRepository(
         result
     }
 
+    /**
+     * Reads one archive's central directory.
+     *
+     * Accuracy notes:
+     * - Entry names are decoded as UTF-8 first and retried as CP437 (the pre-UTF-8 zip default)
+     *   when that yields no images, which is what older Windows and Japanese archivers produce.
+     *   Without the retry a perfectly good `1.jpg` could be invisible and the archive would be
+     *   written off as empty.
+     * - An archive that cannot be opened at all is reported as encrypted or corrupt from the
+     *   failure itself, never guessed from an empty image list.
+     * - Creation time is read where the filesystem exposes it, giving a real "recently added" sort.
+     */
     private fun inspectDirect(file: File, volumeId: String): ScanCacheEntry {
         val path = file.canonicalOrAbsolute()
+        val created = file.creationTimeOrZero()
+        fun row(
+            images: List<String>,
+            cover: Pair<String?, Boolean>,
+            encrypted: Boolean,
+            corrupt: Boolean
+        ) = ScanCacheEntry(
+            path = path,
+            volumeId = volumeId,
+            fileName = file.name,
+            sizeBytes = file.length(),
+            lastModified = file.lastModified(),
+            imageCount = images.size,
+            hasCover = cover.second,
+            isEncrypted = encrypted,
+            isCorrupt = corrupt,
+            scannedAt = System.currentTimeMillis(),
+            createdAt = created,
+            coverEntry = cover.first,
+            ruleVersion = SCAN_RULE_VERSION
+        )
+
         return try {
-            ZipFile(file).use { archive ->
-                val images = archive.entries().asSequence()
-                    .filter { !it.isDirectory && it.name.isImageEntry() }
-                    .map { it.name }
-                    .toList()
-                val (_, hasCover) = resolveCoverEntry(images)
-                ScanCacheEntry(path, volumeId, file.name, file.length(), file.lastModified(), images.size, hasCover, false, false, System.currentTimeMillis())
+            var images = emptyList<String>()
+            for (charset in ARCHIVE_CHARSETS) {
+                ZipFile(file, charset).use { archive ->
+                    images = archive.entries().asSequence()
+                        .filter { !it.isDirectory }
+                        .map { it.name }
+                        .filter { it.isImageEntry() }
+                        .toList()
+                }
+                if (images.isNotEmpty()) break
             }
+            row(images, resolveCoverEntry(images), encrypted = false, corrupt = false)
         } catch (exception: Throwable) {
-            val encrypted = exception.message.orEmpty().contains("encrypt", true) || exception.message.orEmpty().contains("password", true)
-            ScanCacheEntry(path, volumeId, file.name, file.length(), file.lastModified(), 0, false, encrypted, !encrypted, System.currentTimeMillis())
+            val message = exception.message.orEmpty()
+            val encrypted = message.contains("encrypt", true) || message.contains("password", true)
+            row(emptyList(), null to false, encrypted, corrupt = !encrypted)
         }
     }
 
@@ -342,10 +407,20 @@ class ZipRepository(
                     }
                 }
             } ?: emptyList()
-            val (_, hasCover) = resolveCoverEntry(images)
-            ScanCacheEntry(uri.toString(), volumeId, displayName, size, lastModified, images.size, hasCover, false, false, System.currentTimeMillis())
+            val cover = resolveCoverEntry(images)
+            ScanCacheEntry(
+                path = uri.toString(), volumeId = volumeId, fileName = displayName, sizeBytes = size,
+                lastModified = lastModified, imageCount = images.size, hasCover = cover.second,
+                isEncrypted = false, isCorrupt = false, scannedAt = System.currentTimeMillis(),
+                createdAt = lastModified, coverEntry = cover.first, ruleVersion = SCAN_RULE_VERSION
+            )
         } catch (exception: Throwable) {
-            ScanCacheEntry(uri.toString(), volumeId, displayName, size, lastModified, 0, false, false, true, System.currentTimeMillis())
+            ScanCacheEntry(
+                path = uri.toString(), volumeId = volumeId, fileName = displayName, sizeBytes = size,
+                lastModified = lastModified, imageCount = 0, hasCover = false,
+                isEncrypted = false, isCorrupt = true, scannedAt = System.currentTimeMillis(),
+                createdAt = lastModified, coverEntry = null, ruleVersion = SCAN_RULE_VERSION
+            )
         }
     }
 
@@ -417,6 +492,36 @@ class ZipRepository(
     // Existing screens consume the richer row type; it is backed by the same natural ordering.
     suspend fun getZipEntries(zip: ZipItem): List<ZipEntryItem> = withContext(Dispatchers.IO) {
         readEntryMetadata(zip).sortedWith(compareBy<ZipEntryItem> { !it.isImage }.thenBy { naturalKey(it.entryPath) })
+    }
+
+    /**
+     * The frames a slideshow plays, in playback order.
+     *
+     * Frame order is a property of the archive and of [FrameOrder] alone. Nothing about how the
+     * **browser** is sorted (name, size, newest, shuffle…) reaches this function — that is the
+     * whole point of it existing, and `FrameOrderTest` pins the behaviour down.
+     */
+    suspend fun playbackFrames(zip: ZipItem, order: FrameOrder): List<ZipEntryItem> =
+        withContext(Dispatchers.IO) {
+            val images = readEntryMetadata(zip).filter { it.isImage }
+            orderFrames(images, order, zip.path)
+        }
+
+    companion object {
+        /** Pure ordering step, shared with unit tests. */
+        fun orderFrames(
+            images: List<ZipEntryItem>,
+            order: FrameOrder,
+            stableSeed: String
+        ): List<ZipEntryItem> {
+            val natural = images.sortedWith(compareBy { naturalKey(it.entryPath) })
+            return when (order) {
+                FrameOrder.NATURAL -> natural
+                FrameOrder.ARCHIVE -> images
+                FrameOrder.REVERSE -> natural.reversed()
+                FrameOrder.SHUFFLE -> natural.shuffled(Random(stableSeed.hashCode()))
+            }
+        }
     }
 
     private fun readEntryMetadata(zip: ZipItem): List<ZipEntryItem> = try {
@@ -638,6 +743,7 @@ class ZipRepository(
         val source = if (isSaf) null else File(path)
         val key = thumbnailKey(path, lastModified, sizeBytes, 512)
         return ZipItem(
+            coverEntryName = coverEntry,
             path = path,
             name = fileName,
             size = sizeBytes,
@@ -656,23 +762,14 @@ class ZipRepository(
             lastFrameIndex = meta?.lastFrameIndex ?: 0,
             isReadOnly = !isSaf && (source?.canWrite() == false || source?.parentFile?.canWrite() == false),
             parentFolder = source?.parent.orEmpty(),
-            watchCount = meta?.watchCount ?: 0
+            watchCount = meta?.watchCount ?: 0,
+            createdAt = if (createdAt > 0L) createdAt else lastModified,
+            lastViewedAt = meta?.updatedAt ?: 0L
         )
     }
 
-    private fun List<ZipItem>.sort(sortBy: SortBy, ascending: Boolean, natural: Boolean, stableSeed: Long): List<ZipItem> {
-        if (sortBy == SortBy.RANDOM) return sortedBy { (it.path.hashCode().toLong() xor stableSeed) }
-        val comparator = compareBy<ZipItem> {
-            when (sortBy) {
-                SortBy.NAME -> if (natural) naturalKey(it.name) else it.name.lowercase()
-                SortBy.DATE_MODIFIED, SortBy.DATE_CREATED -> it.lastModified.toString().padStart(20, '0')
-                SortBy.SIZE -> it.size.toString().padStart(20, '0')
-                SortBy.IMAGE_COUNT -> it.imageCount.toString().padStart(10, '0')
-                SortBy.RANDOM -> it.path
-            }
-        }
-        return if (ascending) sortedWith(comparator) else sortedWith(comparator.reversed())
-    }
+    private fun List<ZipItem>.sort(sortBy: SortBy, ascending: Boolean, natural: Boolean, stableSeed: Long): List<ZipItem> =
+        sortedForBrowser(sortBy, ascending, natural, stableSeed)
 
     private fun Volume.matchesFilter(filter: VolumeFilter) = when (filter) {
         VolumeFilter.ALL -> true
@@ -697,6 +794,11 @@ class ZipRepository(
     private fun String.isImageEntry(): Boolean = CoverRule.isImageEntry(this)
     private fun ZipEntry.toItem() = ZipEntryItem(name, name.substringAfterLast('/'), name.isImageEntry(), size.coerceAtLeast(0), compressedSize.coerceAtLeast(0), folderPath = name.substringBeforeLast('/', ""))
     private fun File.canonicalOrAbsolute() = runCatching { canonicalPath }.getOrDefault(absolutePath)
+    private fun File.isArchiveCandidate(): Boolean = isFile && name.isArchiveName()
+    private fun String.isArchiveName(): Boolean = substringAfterLast('.', "").lowercase() in ARCHIVE_EXT
+    private fun File.creationTimeOrZero(): Long = runCatching {
+        Files.readAttributes(toPath(), BasicFileAttributes::class.java).creationTime().toMillis()
+    }.getOrDefault(0L)
     /**
      * Downsamples to the smallest power-of-two step that still covers [targetPx] on the longest
      * edge. Sampling past the target is what made frames look soft, so the loop stops one step

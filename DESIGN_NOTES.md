@@ -66,3 +66,39 @@ Two rules keep it honest:
 
 *Surprise me* resolves to a concrete style on each pager settle — never mid-animation — so a random
 run never changes curve halfway through a turn.
+
+## 7. Two Orders, Two Homes
+
+The reported bug — "sorting the library also reorders the pictures inside a zip" — is the kind of
+thing that happens when one `AppSettings.sortBy` is read by two subsystems that should never have
+shared it. Rather than hunt for a single offending call site and hope, the fix makes the separation
+structural:
+
+- `util/ZipSorting.kt` owns the **only** library comparator. The repository and the browser view
+  model both delegate to it, so they can no longer drift (they previously had two copies, both
+  comparing zero-padded strings — a size over 20 digits or a name longer than the pad sorted wrong).
+- `ZipRepository.playbackFrames(zip, order)` owns the **only** frame ordering, and its signature
+  simply has nowhere to put a library sort. `FrameOrderTest` walks every library preset and asserts
+  the frame list does not move.
+
+The UI mirrors the split: "Library order" and "Frame order" are two separate rows, each with its own
+vocabulary. A user who wants reverse reading order now has a named control for it instead of
+discovering it as a side effect.
+
+## 8. Why Removing Double-Tap Made Taps Faster
+
+`detectTapGestures` cannot fire `onTap` until it knows a second tap is not coming, so every page
+turn paid the full double-tap timeout — about 300 ms of nothing. The gesture was also competing with
+the pager for the same pixels. Dropping `onDoubleTap` means a tap dispatches on the up event, and the
+zones grew to 42 % per side so "the middle of the right half" is unambiguously forward. Zoom loses
+nothing a slideshow needs: pinch still goes to 6×, and pinching back out restores the fit.
+
+## 9. Making a Swipe Feel Like a Swipe
+
+A transition that looks beautiful on a 520 ms timer can feel like rubber under a thumb, because the
+finger is driving a curve that was designed to be driven by a clock. The viewer now distinguishes
+*who* is scrolling: a `programmaticScroll` flag is raised around `animateScrollToPage`, and any
+scroll without it is a drag, which renders with a plain one-to-one push. Styled motion returns the
+moment the pager settles — and since every style is the identity transform at offset 0, the handover
+is literally invisible. A medium-low snap spring and a 0.22 positional threshold finish the job, with
+three frames preloaded in each direction so the decoder is never what you are waiting for.

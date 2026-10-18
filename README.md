@@ -54,8 +54,18 @@ The viewer is built around reading, not transport controls.
 - **Clean letterboxing** — a fitted frame sits on pure black; nothing moves behind it.
 - **Rotation lock** — optionally freeze the orientation for as long as the viewer is open.
 - **Cinema mode** — system bars hide with the chrome and return with it.
-- **Gestures** — pinch/double-tap zoom with bounded panning, swipe down to dismiss with a live
+- **Tap zones that answer immediately** — the left 42 % goes back, the right 42 % goes forward, and
+  the 16 % band down the middle toggles the chrome. There is deliberately **no double-tap zoom**:
+  registering one forces every single tap to wait out the ~300 ms double-tap window first, which is
+  what used to make side taps feel sluggish. Zoom is pinch-only, and pinching back under 1× restores
+  the fitted frame.
+- **Gestures** — pinch zoom to 6× with bounded panning, swipe down to dismiss with a live
   scale-and-slide, long-press to save the frame to `Pictures/ZipSlide`.
+- **Finger-true swiping** — while you are dragging, the frame tracks your thumb one-to-one with a
+  plain push; the chosen transition style is reserved for taps, keys and the auto-advance timer. The
+  swap is invisible because it can only happen at rest, where every style is the identity transform.
+  Releases settle on a medium-low spring with a 0.22 positional threshold, so a short confident
+  flick already commits to the next frame instead of rubber-banding back.
 - **Scrubber** — drag the hairline rail at the bottom to jump anywhere in a 300-frame archive instantly.
 - **Resume** — the last settled frame is persisted per archive and restored on the next launch; the
   browser draws a gold progress rail across any card you are part-way through.
@@ -63,8 +73,8 @@ The viewer is built around reading, not transport controls.
 ### Playback performance
 
 - Frames decode on a bounded `Dispatchers.Default` pool — never on the main thread.
-- A dedicated LRU frame cache (¼ of heap) holds decoded frames; the current page plus two in each
-  direction stay warm, everything else is evicted.
+- A dedicated LRU frame cache (¼ of heap) holds decoded frames; the current page plus three in each
+  direction stay warm, everything else is evicted — a fast flick stays ahead of the decoder.
 - Downsampling stops one power-of-two step *before* the target size, so frames are never decoded
   smaller than the panel and then upscaled.
 - The open `ZipFile` is reused for the whole session, and all decoded frames are released when playback ends.
@@ -94,3 +104,44 @@ To build locally, use JDK 17 and an Android SDK containing platform `android-36.
 ```
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+
+## Ordering: two separate things
+
+Sorting the shelf never renumbers the pages of a book sitting on it. ZipSlide keeps the two ideas in
+different places on purpose, because conflating them is a classic gallery-app bug.
+
+**Library order** (browser toolbar → Sort, or Settings → Library order) is a flat list of labelled
+presets rather than a sort key plus a hidden ascending toggle, so the label *is* the behaviour and
+"Newest first" can never come out backwards:
+
+| Preset | Orders by |
+| --- | --- |
+| Newest first / Oldest first | File modified time |
+| Recently added / First added | Filesystem creation time, where the platform reports one |
+| Name A → Z / Z → A | Natural order, so `vol 2` precedes `vol 10` |
+| Largest / Smallest | Archive size on disk |
+| Most frames / Fewest frames | Image count |
+| Recently viewed | When you last opened it |
+| Most viewed / Least viewed | Completed play count |
+| Furthest along | Resume position as a fraction |
+| Folder | Containing folder, then natural name |
+| Shuffle | A fresh stable order each time you tap it |
+
+**Frame order** (Settings → Frame order) controls the order *inside* an archive and has exactly four
+values: Natural (default), As stored, Reverse, Shuffle. Frames are produced by a dedicated
+`ZipRepository.playbackFrames(zip, order)` that takes no library-sort input at all, and
+`FrameOrderTest` asserts the frame list is byte-identical across every library preset.
+
+## Scanning accuracy
+
+- `.cbz` is recognised alongside `.zip` — it is a zip wearing a different hat.
+- Entry names are decoded as UTF-8 and retried as CP437 when that yields no images, so archives
+  written by older Windows and Japanese tools are not written off as empty.
+- The walker canonicalises directories and refuses to re-enter one, which kills the duplicate
+  listings that symlinked storage (`/sdcard` → `/storage/emulated/0`) used to produce; depth now
+  reaches 12 levels, and `.nomedia` folders are respected unless hidden files are shown.
+- Creation time is recorded per archive, which is what makes "Recently added" meaningful.
+- Cached scan rows carry a rule version, so changing the inspection logic re-inspects every archive
+  once instead of trusting a stale row whose size and timestamp happen to match.
+- The cover rule is unchanged: an archive with no `1.*` frame stays hidden (the count of what was
+  hidden is shown in the subtitle, and the rule can be switched off in Settings).

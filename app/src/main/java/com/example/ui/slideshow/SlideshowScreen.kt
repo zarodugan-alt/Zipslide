@@ -12,6 +12,8 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -39,7 +41,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -120,10 +124,14 @@ import kotlinx.coroutines.withContext
 import kotlin.math.abs
 import kotlin.random.Random
 
-/** Frames held around the current page. Three on screen, two warmed in each direction. */
-private const val PRELOAD_RADIUS = 2
+/**
+ * Frames decoded around the current page. Three in each direction keeps a fast flick ahead of the
+ * decoder, which is what makes a swipe feel smooth rather than merely animated.
+ */
+private const val PRELOAD_RADIUS = 3
 private const val CHROME_TIMEOUT_MS = 3_500L
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SlideshowScreen(
     zipPath: String,
@@ -190,7 +198,7 @@ fun SlideshowScreen(
             )
             zipRepository.beginPlayback(item)
             localZipItem = item
-            localEntries = zipRepository.getZipEntries(item).filter { it.isImage }
+            localEntries = zipRepository.playbackFrames(item, effectiveSettings.frameOrder)
             localLoadingEntries = false
         }
     }
@@ -241,6 +249,8 @@ fun SlideshowScreen(
         return
     }
 
+    // Frames arrive from the repository already in playback order. The only thing the viewer may
+    // do is the session shuffle toggle; browser sorting is deliberately not an input here.
     val displayIndices = remember(entries.size, isShuffle, zipPath) {
         if (isShuffle) entries.indices.shuffled(Random(zipPath.hashCode())) else entries.indices.toList()
     }
@@ -264,6 +274,30 @@ fun SlideshowScreen(
     val isSettled by remember {
         derivedStateOf { !pagerState.isScrollInProgress && pagerState.currentPageOffsetFraction == 0f }
     }
+
+    // Set only while the app itself is scrolling the pager (tap, key, timer, scrubber).
+    var programmaticScroll by remember { mutableStateOf(false) }
+    val userDragging by remember {
+        derivedStateOf { pagerState.isScrollInProgress && !programmaticScroll }
+    }
+    /**
+     * While a finger is on the glass the frame must track it one-to-one. A cube or a fan looks
+     * right when a timer drives it and looks like rubber when a drag does, so manual motion always
+     * falls back to a plain push and the chosen style is reserved for taps, keys and auto-advance.
+     * The swap is invisible because it can only happen at rest, where every style is identity.
+     */
+    val activeTransition = if (userDragging) SlideTransition.PUSH else transition
+
+    // A medium-low spring settles the page with momentum instead of the default stiff snap, and a
+    // low positional threshold means a short confident flick already commits to the next frame.
+    val pagerFling = PagerDefaults.flingBehavior(
+        state = pagerState,
+        snapAnimationSpec = spring(
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMediumLow
+        ),
+        snapPositionalThreshold = 0.22f
+    )
 
     fun persistFrame(page: Int) {
         val frame = displayIndices.getOrNull(page) ?: return
@@ -295,13 +329,18 @@ fun SlideshowScreen(
         if (pageCount == 0) return
         val target = page.coerceIn(0, pageCount - 1)
         scope.launch {
-            if (animate) {
-                pagerState.animateScrollToPage(
-                    page = target,
-                    animationSpec = tween(durationMs, easing = DesignTokens.Motion.standardEasing)
-                )
-            } else {
-                pagerState.scrollToPage(target)
+            programmaticScroll = true
+            try {
+                if (animate) {
+                    pagerState.animateScrollToPage(
+                        page = target,
+                        animationSpec = tween(durationMs, easing = DesignTokens.Motion.standardEasing)
+                    )
+                } else {
+                    pagerState.scrollToPage(target)
+                }
+            } finally {
+                programmaticScroll = false
             }
         }
     }
@@ -472,8 +511,9 @@ fun SlideshowScreen(
     ) {
         HorizontalPager(
             state = pagerState,
-            beyondViewportPageCount = 1,
+            beyondViewportPageCount = 2,
             key = { page -> page },
+            flingBehavior = pagerFling,
             modifier = Modifier.fillMaxSize()
         ) { page ->
             var scale by remember(page) { mutableFloatStateOf(1f) }
@@ -506,28 +546,19 @@ fun SlideshowScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .pointerInput(pageCount, tapZonesEnabled) {
+                        // No onDoubleTap: with a double-tap handler registered, every single tap
+                        // has to wait out the ~300 ms double-tap window before it fires, which is
+                        // exactly why page turns felt laggy. Taps are now instant, and the zones
+                        // are 42 % of the width each so the middle of either side always hits.
                         detectTapGestures(
                             onTap = { offset ->
                                 val zone = offset.x / size.width
                                 when {
                                     !tapZonesEnabled || scale > 1.05f -> chromeVisible = !chromeVisible
-                                    zone >= 0.68f -> { tick(); pulse(1); advance(auto = false) }
-                                    zone <= 0.32f -> { tick(); pulse(-1); previous() }
+                                    zone >= 0.58f -> { tick(); pulse(1); advance() }
+                                    zone <= 0.42f -> { tick(); pulse(-1); previous() }
                                     else -> chromeVisible = !chromeVisible
                                 }
-                            },
-                            onDoubleTap = { offset ->
-                                if (scale > 1.05f) {
-                                    scale = 1f
-                                    pan = Offset.Zero
-                                } else {
-                                    scale = 2.5f
-                                    pan = Offset(
-                                        x = (size.width / 2f - offset.x) * 1.5f,
-                                        y = (size.height / 2f - offset.y) * 1.5f
-                                    )
-                                }
-                                if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                             },
                             onLongPress = {
                                 if (hapticsEnabled) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -537,7 +568,7 @@ fun SlideshowScreen(
                     }
                     .pointerInput(page) {
                         detectTransformGestures { _, panChange, zoom, _ ->
-                            val next = (scale * zoom).coerceIn(1f, 5f)
+                            val next = (scale * zoom).coerceIn(1f, 6f)
                             scale = next
                             pan = if (next > 1f) {
                                 val limitX = size.width * (next - 1f) / 2f
@@ -578,7 +609,7 @@ fun SlideshowScreen(
                             .fillMaxSize()
                             .graphicsLayer {
                                 val offset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
-                                applyTransition(transition, offset)
+                                applyTransition(activeTransition, offset)
                                 val zoom = scale * kenBurns.value
                                 scaleX *= zoom
                                 scaleY *= zoom

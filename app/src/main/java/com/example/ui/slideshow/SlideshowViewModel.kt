@@ -9,6 +9,7 @@ import com.example.data.model.SlideTransition
 import com.example.data.model.ZipEntryItem
 import com.example.data.model.ZipItem
 import com.example.data.toUserMessage
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -50,7 +51,10 @@ class SlideshowViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val zip = container.zips.findZipItem(event.path) ?: fallback(event.path)
                 container.zips.beginPlayback(zip)
-                val images = container.zips.getZipEntries(zip).filter { it.isImage }
+                // Playback order comes from the frame-order setting alone — never from the
+                // library sort the browser happens to be using.
+                val order = container.settings.settings.first().frameOrder
+                val images = container.zips.playbackFrames(zip, order)
                 // No pager will be composed for an archive without images, so release it now.
                 if (images.isEmpty()) container.zips.endPlayback(zip.path)
                 local.value = SlideshowState(zip = zip, images = images, loading = false)

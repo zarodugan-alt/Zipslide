@@ -12,6 +12,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +36,7 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FolderZip
@@ -49,8 +51,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -81,6 +81,7 @@ import com.example.data.ZipRepository
 import com.example.data.toUserMessage
 import com.example.data.model.BrowserFilter
 import com.example.data.model.SortBy
+import com.example.data.model.SortOption
 import com.example.data.model.ViewMode
 import com.example.data.model.ZipItem
 import com.example.design.ZipSlideTheme
@@ -397,27 +398,49 @@ fun BrowserScreen(
                                 DropdownMenu(
                                     expanded = sortMenuOpen,
                                     onDismissRequest = { sortMenuOpen = false },
-                                    modifier = Modifier.background(ZipSlideTheme.colors.surfaceElev)
+                                    modifier = Modifier
+                                        .background(ZipSlideTheme.colors.surfaceElev)
+                                        .heightIn(max = 420.dp)
                                 ) {
-                                    SortBy.entries.forEach { sortOption ->
+                                    Text(
+                                        text = "Sort library",
+                                        style = ZipSlideTheme.typography.caption,
+                                        color = ZipSlideTheme.colors.textSecondary,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
+                                    // Presets, not a key plus a hidden direction toggle: the label
+                                    // is the behaviour. This orders the library only — frames
+                                    // inside an archive are ordered by Settings › Frame order.
+                                    val current = SortOption.of(settings.sortBy, settings.sortAscending)
+                                    SortOption.entries.forEach { option ->
+                                        val selected = option == current
                                         DropdownMenuItem(
                                             text = {
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    RadioButton(
-                                                        selected = settings.sortBy == sortOption,
-                                                        onClick = null,
-                                                        colors = RadioButtonDefaults.colors(selectedColor = ZipSlideTheme.colors.accent)
-                                                    )
-                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                Column {
                                                     Text(
-                                                        text = sortOption.name.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() },
-                                                        color = ZipSlideTheme.colors.textPrimary
+                                                        text = option.label,
+                                                        color = if (selected) ZipSlideTheme.colors.accent else ZipSlideTheme.colors.textPrimary,
+                                                        style = ZipSlideTheme.typography.bodyM
+                                                    )
+                                                    Text(
+                                                        text = option.description,
+                                                        color = ZipSlideTheme.colors.textSecondary,
+                                                        style = ZipSlideTheme.typography.caption
+                                                    )
+                                                }
+                                            },
+                                            trailingIcon = {
+                                                if (selected) {
+                                                    Icon(
+                                                        Icons.Default.Check,
+                                                        contentDescription = null,
+                                                        tint = ZipSlideTheme.colors.accent
                                                     )
                                                 }
                                             },
                                             onClick = {
                                                 sortMenuOpen = false
-                                                onEvent(BrowserEvent.SortChange(sortOption))
+                                                onEvent(BrowserEvent.SortChange(option))
                                             }
                                         )
                                     }

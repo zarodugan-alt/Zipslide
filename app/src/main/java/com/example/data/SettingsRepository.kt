@@ -11,7 +11,9 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.data.model.SlideTransition
+import com.example.data.model.FrameOrder
 import com.example.data.model.SortBy
+import com.example.data.model.SortOption
 import com.example.data.model.ThemeMode
 import com.example.data.model.ViewMode
 import com.example.data.model.VolumeFilter
@@ -39,7 +41,9 @@ data class AppSettings(
     val slideLoop: Boolean = true,
     val slideFitToScreen: Boolean = true,
     val slideKeepScreenOn: Boolean = true,
-    val slideTransition: SlideTransition = SlideTransition.FADE,
+    val slideTransition: SlideTransition = SlideTransition.SLIDE,
+    /** Frame order inside an archive. Never derived from [sortBy]; the two are unrelated. */
+    val frameOrder: FrameOrder = FrameOrder.NATURAL,
     val slideTransitionMs: Int = 520,
     val slideTapZones: Boolean = true,
     /** Volume down advances, volume up goes back, while the viewer is on screen. */
@@ -88,6 +92,7 @@ class SettingsRepository(private val context: Context) {
         val slideFitToScreen = booleanPreferencesKey("slide_fit_to_screen")
         val slideKeepScreenOn = booleanPreferencesKey("slide_keep_screen_on")
         val slideTransition = stringPreferencesKey("slide_transition")
+        val frameOrder = stringPreferencesKey("frame_order")
         val slideTransitionMs = intPreferencesKey("slide_transition_ms")
         val slideTapZones = booleanPreferencesKey("slide_tap_zones")
         val slideVolumeKeys = booleanPreferencesKey("slide_volume_keys")
@@ -125,7 +130,8 @@ class SettingsRepository(private val context: Context) {
         slideLoop = prefs[Key.slideLoop] ?: true,
         slideFitToScreen = prefs[Key.slideFitToScreen] ?: true,
         slideKeepScreenOn = prefs[Key.slideKeepScreenOn] ?: true,
-        slideTransition = prefs.enum(Key.slideTransition, SlideTransition.FADE),
+        slideTransition = prefs.enum(Key.slideTransition, SlideTransition.SLIDE),
+        frameOrder = prefs.enum(Key.frameOrder, FrameOrder.NATURAL),
         slideTransitionMs = (prefs[Key.slideTransitionMs] ?: 520).coerceIn(160, 1200),
         slideTapZones = prefs[Key.slideTapZones] ?: true,
         slideVolumeKeys = prefs[Key.slideVolumeKeys] ?: true,
@@ -170,6 +176,7 @@ class SettingsRepository(private val context: Context) {
         prefs[Key.slideFitToScreen] = value.slideFitToScreen
         prefs[Key.slideKeepScreenOn] = value.slideKeepScreenOn
         prefs[Key.slideTransition] = value.slideTransition.name
+        prefs[Key.frameOrder] = value.frameOrder.name
         prefs[Key.slideTransitionMs] = value.slideTransitionMs
         prefs[Key.slideTapZones] = value.slideTapZones
         prefs[Key.slideVolumeKeys] = value.slideVolumeKeys
@@ -190,6 +197,10 @@ class SettingsRepository(private val context: Context) {
     suspend fun updateShowFilenames(show: Boolean) = update { it.copy(showFilenames = show) }
     suspend fun updateShowBadges(show: Boolean) = update { it.copy(showBadges = show) }
     suspend fun updateSortBy(sortBy: SortBy) = update { it.copy(sortBy = sortBy) }
+    /** Applies a labelled preset's key and direction together so the two can never disagree. */
+    suspend fun updateSortOption(option: SortOption) =
+        update { it.copy(sortBy = option.sortBy, ascending = option.ascending) }
+    suspend fun updateFrameOrder(order: FrameOrder) = update { it.copy(frameOrder = order) }
     suspend fun updateSortAscending(ascending: Boolean) = update { it.copy(ascending = ascending) }
     suspend fun updateNaturalSort(natural: Boolean) = update { it.copy(naturalSort = natural) }
     suspend fun updateStorageSource(source: String) = update { it.copy(volumeFilter = source.toVolumeFilter()) }

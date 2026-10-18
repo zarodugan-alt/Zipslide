@@ -54,7 +54,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.data.AppSettings
-import com.example.data.model.SortBy
+import com.example.data.model.FrameOrder
+import com.example.data.model.SortOption
 import com.example.data.model.ViewMode
 import com.example.design.ZipSlideTheme
 import com.example.ui.components.ConfirmDialog
@@ -78,6 +79,7 @@ fun SettingsScreen(
     var showRegenerateConfirm by remember { mutableStateOf(false) }
     var showLicensesDialog by remember { mutableStateOf(false) }
     var sortDropdownOpen by remember { mutableStateOf(false) }
+    var frameOrderOpen by remember { mutableStateOf(false) }
 
     // Repository calculates cache size on Dispatchers.IO; the screen only formats immutable state.
     val cacheSize = formatBytes(cacheSizeBytes)
@@ -193,10 +195,11 @@ fun SettingsScreen(
             }
 
             item {
-                SettingRow(label = "Sort by") {
+                SettingRow(label = "Library order") {
                     Box {
+                        val current = SortOption.of(settings.sortBy, settings.sortAscending)
                         Text(
-                            text = settings.sortBy.name.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() },
+                            text = current.label,
                             style = ZipSlideTheme.typography.bodyM,
                             color = ZipSlideTheme.colors.accent,
                             modifier = Modifier
@@ -207,14 +210,28 @@ fun SettingsScreen(
                         DropdownMenu(
                             expanded = sortDropdownOpen,
                             onDismissRequest = { sortDropdownOpen = false },
-                            modifier = Modifier.background(ZipSlideTheme.colors.surfaceElev)
+                            modifier = Modifier
+                                .background(ZipSlideTheme.colors.surfaceElev)
+                                .heightIn(max = 420.dp)
                         ) {
-                            SortBy.entries.forEach { sortOption ->
+                            SortOption.entries.forEach { option ->
                                 DropdownMenuItem(
-                                    text = { Text(sortOption.name.replace('_', ' ').lowercase().replaceFirstChar { it.uppercase() }, color = ZipSlideTheme.colors.textPrimary) },
+                                    text = {
+                                        Column {
+                                            Text(
+                                                option.label,
+                                                color = if (option == current) ZipSlideTheme.colors.accent else ZipSlideTheme.colors.textPrimary
+                                            )
+                                            Text(
+                                                option.description,
+                                                style = ZipSlideTheme.typography.caption,
+                                                color = ZipSlideTheme.colors.textSecondary
+                                            )
+                                        }
+                                    },
                                     onClick = {
                                         sortDropdownOpen = false
-                                        onEvent(SettingsEvent.SetSort(sortOption))
+                                        onEvent(SettingsEvent.SetSortOption(option))
                                     }
                                 )
                             }
@@ -224,12 +241,50 @@ fun SettingsScreen(
             }
 
             item {
-                SettingSwitchRow(
-                    label = "Ascending order",
-                    checked = settings.sortAscending,
-                    onCheckedChange = { onEvent(SettingsEvent.SetAscending(it)) }
-                )
+                // Deliberately separate from library order, and labelled as such: sorting the
+                // shelf must never renumber the pages of a book sitting on it.
+                SettingRow(label = "Frame order") {
+                    Box {
+                        Text(
+                            text = settings.frameOrder.label,
+                            style = ZipSlideTheme.typography.bodyM,
+                            color = ZipSlideTheme.colors.accent,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(ZipSlideTheme.radii.sm))
+                                .clickable { frameOrderOpen = true }
+                                .padding(horizontal = 12.dp, vertical = 6.dp)
+                        )
+                        DropdownMenu(
+                            expanded = frameOrderOpen,
+                            onDismissRequest = { frameOrderOpen = false },
+                            modifier = Modifier.background(ZipSlideTheme.colors.surfaceElev)
+                        ) {
+                            FrameOrder.entries.forEach { order ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Column {
+                                            Text(
+                                                order.label,
+                                                color = if (order == settings.frameOrder) ZipSlideTheme.colors.accent else ZipSlideTheme.colors.textPrimary
+                                            )
+                                            Text(
+                                                order.description,
+                                                style = ZipSlideTheme.typography.caption,
+                                                color = ZipSlideTheme.colors.textSecondary
+                                            )
+                                        }
+                                    },
+                                    onClick = {
+                                        frameOrderOpen = false
+                                        onEvent(SettingsEvent.SetFrameOrder(order))
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
             }
+
 
             item {
                 SettingSwitchRow(

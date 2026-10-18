@@ -6,7 +6,9 @@ import androidx.lifecycle.viewModelScope
 import com.example.ZipSlideApplication
 import com.example.data.AppSettings
 import com.example.data.model.SlideTransition
+import com.example.data.model.FrameOrder
 import com.example.data.model.SortBy
+import com.example.data.model.SortOption
 import com.example.data.model.ViewMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -25,6 +27,8 @@ sealed interface SettingsEvent {
     data class SetTheme(val value: String) : SettingsEvent
     data class SetViewMode(val mode: ViewMode) : SettingsEvent
     data class SetSort(val sortBy: SortBy) : SettingsEvent
+    data class SetSortOption(val option: SortOption) : SettingsEvent
+    data class SetFrameOrder(val order: FrameOrder) : SettingsEvent
     data class SetAscending(val value: Boolean) : SettingsEvent
     data class SetStorageSource(val value: String) : SettingsEvent
     data class SetCustomScanFolder(val uri: String) : SettingsEvent
@@ -71,6 +75,8 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
             is SettingsEvent.SetTheme -> container.settings.updateTheme(event.value)
             is SettingsEvent.SetViewMode -> container.settings.updateViewMode(event.mode)
             is SettingsEvent.SetSort -> container.settings.updateSortBy(event.sortBy)
+            is SettingsEvent.SetSortOption -> container.settings.updateSortOption(event.option)
+            is SettingsEvent.SetFrameOrder -> container.settings.updateFrameOrder(event.order)
             is SettingsEvent.SetAscending -> container.settings.updateSortAscending(event.value)
             is SettingsEvent.SetStorageSource -> {
                 container.settings.updateStorageSource(event.value)
